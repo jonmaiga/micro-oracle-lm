@@ -63,6 +63,10 @@ inline context make_context_at(const std::vector<token_id>& tokens, uint32_t ind
 // Cosine distance over the (binary) feature sets. Both feature lists are sorted
 // by construction, so overlap is a linear merge.
 inline double distance(const context& a, const context& b) {
+	if (a.features.empty() || b.features.empty()) {
+		return a.features.empty() && b.features.empty() ? 0. : 1.;
+	}
+
 	std::size_t i = 0;
 	std::size_t j = 0;
 	std::size_t overlap = 0;
@@ -79,11 +83,9 @@ inline double distance(const context& a, const context& b) {
 			++j;
 		}
 	}
-	if (a.features.empty() || b.features.empty()) {
-		return a.features.empty() && b.features.empty() ? 0. : 1.;
-	}
 	const auto den = std::sqrt(static_cast<double>(a.features.size()) * static_cast<double>(b.features.size()));
-	return den > 0. ? 1. - static_cast<double>(overlap) / den : 0.;
+	assert(den > 0);
+	return 1. - static_cast<double>(overlap) / den;
 }
 
 // Naive-Bayes statistics for the events routed to one leaf.
@@ -158,7 +160,7 @@ class tree {
 public:
 	tree() = default;
 
-	tree(config cfg, uint64_t seed, const std::vector<event>* events) :
+	tree(const config& cfg, uint64_t seed, const std::vector<event>* events) :
 		_cfg(cfg), _seed(seed), _events(events) {
 	}
 
