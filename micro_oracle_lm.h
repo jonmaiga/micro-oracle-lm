@@ -14,7 +14,6 @@
 
 #include <algorithm>
 #include <cassert>
-#include <cmath>
 #include <cstdint>
 #include <random>
 #include <span>
@@ -253,16 +252,18 @@ private:
 
 class micro_oracle_lm {
 public:
-	explicit micro_oracle_lm(config cfg) : _cfg(cfg) {
+	explicit micro_oracle_lm(const config& cfg) : _cfg(cfg) {
 	}
 
 	void train(const std::vector<std::vector<token_id>>& samples) {
 		_models.assign(_cfg.vocab_size, {});
 
 		for (const auto& sample : samples) {
-			for (std::size_t i = 1; i + 1 < sample.size(); ++i) {
-				_models[sample[i]].events.push_back(
-					{make_context_at(sample, static_cast<uint32_t>(i), _cfg.context_size, _cfg.vocab_size), sample[i + 1]});
+			for (std::size_t i = 0; i + 1 < sample.size(); ++i) {
+				_models[sample[i]].events.push_back({
+					make_context_at(sample, static_cast<uint32_t>(i), _cfg.context_size, _cfg.vocab_size),
+					sample[i + 1]
+				});
 			}
 		}
 
@@ -283,14 +284,8 @@ public:
 		}
 	}
 
-	// Returns the per-token probability distribution for the token following
-	// `tokens[index_to_predict]`. Empty if there is no model for the current
-	// token or the index is out of range.
 	std::vector<double> predict(const std::vector<token_id>& tokens, uint32_t index_to_predict) const {
-		if (index_to_predict >= tokens.size()) {
-			assert(false);
-			return {};
-		}
+		assert(index_to_predict < tokens.size());
 
 		if (tokens.empty()) {
 			// todo: model prior
@@ -329,11 +324,6 @@ public:
 	}
 
 private:
-	struct token_model {
-		std::vector<event> events;
-		std::vector<tree> trees;
-	};
-
 	void softmax_normalize(std::vector<double>& values) const {
 		assert(_cfg.softmax_temperature > 0);
 		assert(std::isfinite(_cfg.softmax_temperature));
@@ -351,6 +341,11 @@ private:
 			v /= sum;
 		}
 	}
+
+	struct token_model {
+		std::vector<event> events;
+		std::vector<tree> trees;
+	};
 
 	config _cfg;
 	std::vector<token_model> _models;

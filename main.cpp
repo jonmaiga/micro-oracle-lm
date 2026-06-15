@@ -119,7 +119,7 @@ uint64_t no_change_hash(micro_oracle::config config) {
 }
 
 void check_integrity() {
-	constexpr uint64_t expected_hash = 4540134499834516908ull;
+	constexpr uint64_t expected_hash = 18011996580393846581ull;
 
 	const auto hash = no_change_hash({.context_size = 5, .ensemble_size = 4, .max_depth = 8});
 	if (hash != expected_hash) {
