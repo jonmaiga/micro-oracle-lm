@@ -257,13 +257,6 @@ public:
 	}
 
 	void train(const std::vector<std::vector<token_id>>& samples) {
-		token_id max_token{};
-		for (const auto& sample : samples) {
-			for (const auto token : sample) {
-				max_token = std::max(max_token, token);
-			}
-		}
-		_cfg.vocab_size = std::max<uint32_t>(_cfg.vocab_size, max_token + 1);
 		_models.assign(_cfg.vocab_size, {});
 
 		for (const auto& sample : samples) {
