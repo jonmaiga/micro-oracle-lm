@@ -13,6 +13,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstdint>
 #include <random>
@@ -294,11 +295,19 @@ public:
 	// token or the index is out of range.
 	std::vector<double> predict(const std::vector<token_id>& tokens, uint32_t index_to_predict) const {
 		if (index_to_predict >= tokens.size()) {
+			assert(false);
 			return {};
 		}
+
+		if (tokens.empty()) {
+			// todo: model prior
+			return std::vector(_cfg.vocab_size, 1. / _cfg.vocab_size);
+		}
+
 		const auto current = tokens[index_to_predict];
 		if (current >= _models.size() || _models[current].trees.empty()) {
-			return {};
+			// todo: oov
+			return std::vector(_cfg.vocab_size, 1. / _cfg.vocab_size);
 		}
 
 		const auto ctx = make_context_at(tokens, index_to_predict, _cfg.context_size, _cfg.vocab_size);
@@ -317,9 +326,8 @@ public:
 			v *= inv;
 		}
 
-		if (!softmax_normalize(probabilities)) {
-			return {};
-		}
+		softmax_normalize(probabilities);
+
 		return probabilities;
 	}
 
@@ -333,23 +341,22 @@ private:
 		std::vector<tree> trees;
 	};
 
-	bool softmax_normalize(std::vector<double>& values) const {
-		if (_cfg.softmax_temperature <= 0. || !std::isfinite(_cfg.softmax_temperature)) {
-			return false;
-		}
+	void softmax_normalize(std::vector<double>& values) const {
+		assert(_cfg.softmax_temperature > 0);
+		assert(std::isfinite(_cfg.softmax_temperature));
+
 		const auto max_log = *std::max_element(values.begin(), values.end());
 		double sum = 0.;
 		for (auto& v : values) {
 			v = std::exp((v - max_log) / _cfg.softmax_temperature);
 			sum += v;
 		}
-		if (sum <= 0.) {
-			return false;
-		}
+		assert(sum > 0.0);
+		assert(std::isfinite(sum));
+
 		for (auto& v : values) {
 			v /= sum;
 		}
-		return true;
 	}
 
 	config _cfg;
