@@ -36,19 +36,13 @@ struct config {
 	double softmax_temperature{1.};
 };
 
-// previous context + current token -> next token
-struct event {
-	context ctx;
-	token_id next{};
-};
-
 // Encodes "previous token at a given backward distance" into one id.
 inline feature_id make_feature(token_id token, uint32_t distance, uint32_t vocab_size) {
 	return static_cast<feature_id>(token) + static_cast<feature_id>(distance) * vocab_size;
 }
 
 inline context make_context_at(const std::vector<token_id>& tokens, uint32_t index,
-                               uint32_t context_size, uint32_t vocab_size) {
+							   uint32_t context_size, uint32_t vocab_size) {
 	context ctx;
 	const auto start = index > context_size ? index - context_size : 0;
 	const uint32_t count = index - start;
@@ -58,6 +52,22 @@ inline context make_context_at(const std::vector<token_id>& tokens, uint32_t ind
 	}
 	return ctx;
 }
+
+// A training position referenced lazily into its token stream. The context and
+// next token are derived on demand instead of materialized per event, keeping
+// memory proportional to the corpus rather than corpus * context_size.
+struct event {
+	const std::vector<token_id>* tokens{};
+	uint32_t index{};
+
+	context ctx(uint32_t context_size, uint32_t vocab_size) const {
+		return make_context_at(*tokens, index, context_size, vocab_size);
+	}
+
+	token_id next() const {
+		return (*tokens)[index + 1];
+	}
+};
 
 // Cosine distance over the (binary) feature sets. Both feature lists are sorted
 // by construction, so overlap is a linear merge.
@@ -86,11 +96,12 @@ inline double distance(const context& a, const context& b) {
 }
 
 inline double sample_radius(std::span<const event> events, std::span<const uint32_t> source, const context& center_ctx,
-                            std::uniform_int_distribution<std::size_t>& dist, std::mt19937_64& rng) {
+							std::uniform_int_distribution<std::size_t>& dist, std::mt19937_64& rng,
+							uint32_t context_size, uint32_t vocab_size) {
 	double radius = 0.;
 	constexpr int radius_samples = 7;
 	for (int i = 0; i < radius_samples; ++i) {
-		radius += distance(events[source[dist(rng)]].ctx, center_ctx);
+		radius += distance(events[source[dist(rng)]].ctx(context_size, vocab_size), center_ctx);
 	}
 	return radius / radius_samples;
 }
@@ -202,10 +213,10 @@ private:
 
 		std::uniform_int_distribution<std::size_t> dist(0, event_count - 1);
 		std::mt19937_64 rng(_seed + depth * 16777619ull + event_count * 2166136261ull + _nodes.size());
-		const auto& center_ctx = events[event_indices[dist(rng)]].ctx;
-		const auto radius = sample_radius(events, event_indices, center_ctx, dist, rng);
+		const auto center_ctx = events[event_indices[dist(rng)]].ctx(_cfg.context_size, _cfg.vocab_size);
+		const auto radius = sample_radius(events, event_indices, center_ctx, dist, rng, _cfg.context_size, _cfg.vocab_size);
 		const auto split = std::ranges::stable_partition(event_indices, [&](const auto index) {
-			return distance(events[index].ctx, center_ctx) < radius;
+			return distance(events[index].ctx(_cfg.context_size, _cfg.vocab_size), center_ctx) < radius;
 		});
 		if (split.empty() || split.size() == event_count) {
 			return build_leaf(events, event_indices, depth);
@@ -224,7 +235,7 @@ private:
 		auto& leaf = _leaves.emplace_back(_cfg.vocab_size);
 		for (const auto index : source) {
 			const auto& e = events[index];
-			leaf.observe(e.ctx, e.next);
+			leaf.observe(e.ctx(_cfg.context_size, _cfg.vocab_size), e.next());
 		}
 
 		const auto node_index = _nodes.size();
@@ -249,10 +260,7 @@ public:
 		std::vector<std::vector<event>> events(_cfg.vocab_size);
 		for (const auto& sample : samples) {
 			for (std::size_t i = 0; i + 1 < sample.size(); ++i) {
-				events[sample[i]].push_back({
-					make_context_at(sample, static_cast<uint32_t>(i), _cfg.context_size, _cfg.vocab_size),
-					sample[i + 1]
-				});
+				events[sample[i]].push_back({&sample, static_cast<uint32_t>(i)});
 			}
 		}
 
