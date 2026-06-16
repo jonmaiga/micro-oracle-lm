@@ -54,8 +54,9 @@ inline context make_context_at(const std::vector<token_id>& tokens, uint32_t ind
                                uint32_t context_size, uint32_t vocab_size) {
 	context ctx;
 	const auto start = index > context_size ? index - context_size : 0;
-	ctx.features.reserve(index - start);
-	for (uint32_t distance = 1; distance <= index - start; ++distance) {
+	const uint32_t count = index - start;
+	ctx.features.reserve(count);
+	for (uint32_t distance = 1; distance <= count; ++distance) {
 		ctx.features.push_back(make_feature(tokens[index - distance], distance, vocab_size));
 	}
 	return ctx;
@@ -119,8 +120,7 @@ public:
 		}
 
 		// todo: replace with global vocab_size?
-		// todo: max is needed because we might train with empty samples now, e.g. when there is not prev context
-		const auto vocabulary_size = std::max(1., static_cast<double>(_feature_map.size()));
+		const auto vocabulary_size = static_cast<double>(_feature_map.size());
 		for (const auto f : ctx.features) {
 			const auto it = _feature_map.find(f);
 			if (it == _feature_map.end()) {
@@ -173,7 +173,6 @@ public:
 private:
 	struct node {
 		bool leaf{true};
-		uint32_t depth{};
 		context center_context;
 		double radius{};
 		uint32_t inner{};
@@ -209,7 +208,7 @@ private:
 
 		const auto mid = static_cast<std::size_t>(split.begin() - event_indices.begin());
 		const auto node_index = _nodes.size();
-		_nodes.push_back({.leaf = false, .depth = depth, .center_context = center_ctx, .radius = radius});
+		_nodes.push_back({.leaf = false, .center_context = center_ctx, .radius = radius});
 		_nodes[node_index].inner = build_node(event_indices.first(mid), depth + 1);
 		_nodes[node_index].outer = build_node(event_indices.subspan(mid), depth + 1);
 		return static_cast<uint32_t>(node_index);
@@ -223,7 +222,7 @@ private:
 			leaf.observe(e.ctx, e.next);
 		}
 
-		_nodes.push_back({.leaf = true, .depth = depth, .leaf_index = leaf_index});
+		_nodes.push_back({.leaf = true, .leaf_index = leaf_index});
 		return static_cast<uint32_t>(_nodes.size() - 1);
 	}
 
@@ -279,11 +278,6 @@ public:
 	std::vector<double> predict(const std::vector<token_id>& tokens, uint32_t index_to_predict) const {
 		assert(index_to_predict < tokens.size());
 
-		if (tokens.empty()) {
-			// todo: model prior
-			return std::vector(_cfg.vocab_size, 1. / _cfg.vocab_size);
-		}
-
 		const auto current = tokens[index_to_predict];
 		if (current >= _models.size() || _models[current].trees.empty()) {
 			// todo: oov
@@ -320,7 +314,7 @@ private:
 		assert(_cfg.softmax_temperature > 0);
 		assert(std::isfinite(_cfg.softmax_temperature));
 
-		const auto max_log = *std::max_element(values.begin(), values.end());
+		const auto max_log = *std::ranges::max_element(values);
 		double sum = 0.;
 		for (auto& v : values) {
 			v = std::exp((v - max_log) / _cfg.softmax_temperature);
