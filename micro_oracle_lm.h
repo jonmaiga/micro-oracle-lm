@@ -98,7 +98,7 @@ public:
 
 		++_sample_count;
 		++_label_stats[label].sample_total;
-		_label_stats[label].feature_total += ctx.features.size();
+		_label_stats[label].feature_total += static_cast<uint32_t>(ctx.features.size());
 
 		for (const auto f : ctx.features) {
 			++_feature_map[f][label];
@@ -127,9 +127,9 @@ public:
 				continue;
 			}
 			const auto& counts = it->second;
-			for (std::size_t label = 0; label < class_count; ++label) {
+			for (token_id label = 0; label < class_count; ++label) {
 				const auto total = _label_stats[label].feature_total;
-				const auto cit = counts.find(static_cast<token_id>(label));
+				const auto cit = counts.find(label);
 				const auto count = cit != counts.end() ? cit->second : 0;
 				const double den = static_cast<double>(total) + smoothing * vocabulary_size;
 				out[label] += std::log((static_cast<double>(count) + smoothing) / den);
@@ -222,8 +222,9 @@ private:
 			leaf.observe(e.ctx, e.next);
 		}
 
+		const auto node_index = _nodes.size();
 		_nodes.push_back({.leaf = true, .leaf_index = leaf_index});
-		return static_cast<uint32_t>(_nodes.size() - 1);
+		return static_cast<uint32_t>(node_index);
 	}
 
 	double sample_radius(std::span<const uint32_t> source, const context& center_ctx,
@@ -287,7 +288,7 @@ public:
 		const auto ctx = make_context_at(tokens, index_to_predict, _cfg.context_size, _cfg.vocab_size);
 		const auto& model = _models[current];
 
-		std::vector<double> probabilities(_cfg.vocab_size, 0.);
+		std::vector<double> probabilities(_cfg.vocab_size);
 		std::vector<double> local(_cfg.vocab_size, 0.);
 		for (const auto& t : model.trees) {
 			t.predict_into(ctx, local);
