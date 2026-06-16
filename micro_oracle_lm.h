@@ -151,14 +151,14 @@ class tree {
 public:
 	tree() = default;
 
-	tree(const config& cfg, uint64_t seed, const std::vector<event>* events) :
-		_cfg(cfg), _seed(seed), _events(events) {
+	tree(const config& cfg, uint64_t seed) :
+		_cfg(cfg), _seed(seed) {
 	}
 
-	void build(std::vector<uint32_t> event_indices) {
+	void build(std::span<const event> events, std::vector<uint32_t> event_indices) {
 		_nodes.clear();
 		_leaves.clear();
-		build_node(event_indices, 0);
+		build_node(events, event_indices, 0);
 	}
 
 	void predict_into(const context& ctx, std::vector<double>& out) const {
@@ -185,36 +185,36 @@ private:
 		return node_index;
 	}
 
-	uint32_t build_node(std::span<uint32_t> event_indices, uint32_t depth) {
+	uint32_t build_node(std::span<const event> events, std::span<uint32_t> event_indices, uint32_t depth) {
 		const auto event_count = event_indices.size();
 		if (depth >= _cfg.max_depth || event_count < 2) {
-			return build_leaf(event_indices, depth);
+			return build_leaf(events, event_indices, depth);
 		}
 
 		std::uniform_int_distribution<std::size_t> dist(0, event_count - 1);
 		std::mt19937_64 rng(_seed + depth * 16777619ull + event_count * 2166136261ull + _nodes.size());
-		const auto& center_ctx = (*_events)[event_indices[dist(rng)]].ctx;
-		const auto radius = sample_radius(event_indices, center_ctx, dist, rng);
+		const auto& center_ctx = events[event_indices[dist(rng)]].ctx;
+		const auto radius = sample_radius(events, event_indices, center_ctx, dist, rng);
 		const auto split = std::ranges::stable_partition(event_indices, [&](const auto index) {
-			return distance((*_events)[index].ctx, center_ctx) < radius;
+			return distance(events[index].ctx, center_ctx) < radius;
 		});
 		if (split.empty() || split.size() == event_count) {
-			return build_leaf(event_indices, depth);
+			return build_leaf(events, event_indices, depth);
 		}
 
 		const auto mid = static_cast<std::size_t>(split.begin() - event_indices.begin());
 		const auto node_index = _nodes.size();
 		_nodes.push_back({.leaf = false, .center_context = center_ctx, .radius = radius});
-		_nodes[node_index].inner = build_node(event_indices.first(mid), depth + 1);
-		_nodes[node_index].outer = build_node(event_indices.subspan(mid), depth + 1);
+		_nodes[node_index].inner = build_node(events, event_indices.first(mid), depth + 1);
+		_nodes[node_index].outer = build_node(events, event_indices.subspan(mid), depth + 1);
 		return static_cast<uint32_t>(node_index);
 	}
 
-	uint32_t build_leaf(std::span<const uint32_t> source, uint32_t depth) {
+	uint32_t build_leaf(std::span<const event> events, std::span<const uint32_t> source, uint32_t depth) {
 		const auto leaf_index = static_cast<uint32_t>(_leaves.size());
 		auto& leaf = _leaves.emplace_back(_cfg.vocab_size);
 		for (const auto index : source) {
-			const auto& e = (*_events)[index];
+			const auto& e = events[index];
 			leaf.observe(e.ctx, e.next);
 		}
 
@@ -223,12 +223,12 @@ private:
 		return static_cast<uint32_t>(node_index);
 	}
 
-	double sample_radius(std::span<const uint32_t> source, const context& center_ctx,
+	double sample_radius(std::span<const event> events, std::span<const uint32_t> source, const context& center_ctx,
 	                     std::uniform_int_distribution<std::size_t>& dist, std::mt19937_64& rng) const {
 		double radius = 0.;
 		constexpr int radius_samples = 7;
 		for (int i = 0; i < radius_samples; ++i) {
-			radius += distance((*_events)[source[dist(rng)]].ctx, center_ctx);
+			radius += distance(events[source[dist(rng)]].ctx, center_ctx);
 		}
 		return radius / radius_samples;
 	}
@@ -237,7 +237,6 @@ private:
 	uint64_t _seed{};
 	std::vector<node> _nodes;
 	std::vector<leaf_model> _leaves;
-	const std::vector<event>* _events{};
 };
 
 class micro_oracle_lm {
@@ -266,8 +265,8 @@ public:
 			std::iota(indices.begin(), indices.end(), 0u);
 			model.trees.resize(_cfg.ensemble_size);
 			for (uint32_t t = 0; t < _cfg.ensemble_size; ++t) {
-				model.trees[t] = tree(_cfg, static_cast<uint64_t>(token) * 1009ull + t, &model.events);
-				model.trees[t].build(indices);
+				model.trees[t] = tree(_cfg, static_cast<uint64_t>(token) * 1009ull + t);
+				model.trees[t].build(model.events, indices);
 			}
 		}
 	}
