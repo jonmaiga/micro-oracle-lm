@@ -88,16 +88,14 @@ inline double distance(const context& a, const context& b) {
 	return 1. - static_cast<double>(overlap) / den;
 }
 
-// Naive-Bayes statistics for the events routed to one leaf.
 class leaf_model {
 public:
 	explicit leaf_model(uint32_t vocab_size) : _vocab_size(vocab_size) {
 	}
 
 	void observe(const context& ctx, token_id label) {
-		if (label >= _vocab_size) {
-			return;
-		}
+		assert(label < _vocab_size);
+
 		++_sample_count;
 		++_label_count[label].count;
 		for (const auto f : ctx.features) {
@@ -111,18 +109,21 @@ public:
 	}
 
 	void predict_into(const context& ctx, std::vector<double>& out, double smoothing) const {
-		std::fill(out.begin(), out.end(), 0.);
-		const auto class_count = out.size();
-		if (_sample_count == 0 || class_count == 0) {
-			return;
-		}
+		assert(!_label_count.empty());
+		assert(out.size() == _label_count.size());
+		assert(_sample_count > 0);
+
+		std::ranges::fill(out, 0.);
+		const auto class_count = _label_count.size();
 
 		const double prior_den = static_cast<double>(_sample_count) + smoothing * static_cast<double>(class_count);
 		for (std::size_t label = 0; label < class_count; ++label) {
-			const auto count = label < _label_count.size() ? _label_count[label].count : 0;
+			const auto count = _label_count[label].count;
 			out[label] = std::log((static_cast<double>(count) + smoothing) / prior_den);
 		}
 
+		// todo: replace with global vocab_size?
+		// todo: max is needed because we might train with empty samples now, e.g. when there is not prev context
 		const auto vocabulary_size = std::max<uint32_t>(1, _observed_feature_count);
 		for (const auto f : ctx.features) {
 			const auto it = _feature_map.find(f);
@@ -131,13 +132,12 @@ public:
 			}
 			const auto& counts = it->second;
 			for (std::size_t label = 0; label < class_count; ++label) {
-				const auto total = label < _label_count.size() ? _label_count[label].feature_total : 0;
+				const auto total = _label_count[label].feature_total;
 				const auto cit = counts.find(static_cast<token_id>(label));
 				const auto count = cit != counts.end() ? cit->second : 0;
 				const double den = static_cast<double>(total) + smoothing * static_cast<double>(vocabulary_size);
-				if (den > 0.) {
-					out[label] += std::log((static_cast<double>(count) + smoothing) / den);
-				}
+				out[label] += std::log((static_cast<double>(count) + smoothing) / den);
+				assert(std::isfinite(out[label]));
 			}
 		}
 	}
