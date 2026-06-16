@@ -98,10 +98,10 @@ public:
 
 		++_sample_count;
 		++_label_stats[label].sample_total;
+		_label_stats[label].feature_total += ctx.features.size();
+
 		for (const auto f : ctx.features) {
-			auto& counts = _feature_map[f];
-			++counts[label];
-			++_label_stats[label].feature_total;
+			++_feature_map[f][label];
 		}
 	}
 
@@ -148,6 +148,7 @@ private:
 	uint32_t _vocab_size{};
 	uint32_t _sample_count{};
 	std::vector<label_stat> _label_stats{_vocab_size};
+	// feature -> next_token->count
 	std::unordered_map<feature_id, std::unordered_map<token_id, uint32_t>> _feature_map;
 };
 
