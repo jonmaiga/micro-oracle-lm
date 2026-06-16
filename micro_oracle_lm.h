@@ -213,14 +213,11 @@ private:
 			return build_leaf(event_indices, depth);
 		}
 
-		const auto node_index = static_cast<uint32_t>(_nodes.size());
+		const auto node_index = _nodes.size();
 		_nodes.push_back({.leaf = false, .depth = depth, .center_context = center_ctx, .radius = radius});
-		const auto child_depth = depth + 1;
-		const auto inner_node = build_node(event_indices.first(mid), child_depth);
-		const auto outer_node = build_node(event_indices.subspan(mid), child_depth);
-		_nodes[node_index].inner = inner_node;
-		_nodes[node_index].outer = outer_node;
-		return node_index;
+		_nodes[node_index].inner = build_node(event_indices.first(mid), depth + 1);
+		_nodes[node_index].outer = build_node(event_indices.subspan(mid), depth + 1);
+		return static_cast<uint32_t>(node_index);
 	}
 
 	uint32_t build_leaf(std::span<const uint32_t> source, uint32_t depth) {
