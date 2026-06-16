@@ -24,6 +24,7 @@
 namespace micro_oracle {
 using token_id = uint32_t;
 using feature_id = uint64_t;
+using context = std::vector<feature_id>;
 
 struct config {
 	uint32_t vocab_size{};
@@ -32,11 +33,6 @@ struct config {
 	uint32_t max_depth{8};
 	double smoothing{0.5};
 	double softmax_temperature{1.};
-};
-
-// A context is the sorted list of feature ids preceding the current token.
-struct context {
-	std::vector<feature_id> features;
 };
 
 // previous context + current token -> next token
@@ -55,9 +51,9 @@ inline context make_context_at(const std::vector<token_id>& tokens, uint32_t ind
 	context ctx;
 	const auto start = index > context_size ? index - context_size : 0;
 	const uint32_t count = index - start;
-	ctx.features.reserve(count);
+	ctx.reserve(count);
 	for (uint32_t distance = 1; distance <= count; ++distance) {
-		ctx.features.push_back(make_feature(tokens[index - distance], distance, vocab_size));
+		ctx.push_back(make_feature(tokens[index - distance], distance, vocab_size));
 	}
 	return ctx;
 }
@@ -65,25 +61,25 @@ inline context make_context_at(const std::vector<token_id>& tokens, uint32_t ind
 // Cosine distance over the (binary) feature sets. Both feature lists are sorted
 // by construction, so overlap is a linear merge.
 inline double distance(const context& a, const context& b) {
-	if (a.features.empty() || b.features.empty()) {
-		return a.features.empty() && b.features.empty() ? 0. : 1.;
+	if (a.empty() || b.empty()) {
+		return a.empty() && b.empty() ? 0. : 1.;
 	}
 
 	std::size_t overlap = 0;
-	for (std::size_t i = 0, j = 0; i < a.features.size() && j < b.features.size();) {
-		if (a.features[i] == b.features[j]) {
+	for (std::size_t i = 0, j = 0; i < a.size() && j < b.size();) {
+		if (a[i] == b[j]) {
 			++overlap;
 			++i;
 			++j;
 		}
-		else if (a.features[i] < b.features[j]) {
+		else if (a[i] < b[j]) {
 			++i;
 		}
 		else {
 			++j;
 		}
 	}
-	const auto den = std::sqrt(static_cast<double>(a.features.size()) * static_cast<double>(b.features.size()));
+	const auto den = std::sqrt(static_cast<double>(a.size()) * static_cast<double>(b.size()));
 	assert(den > 0);
 	return 1. - static_cast<double>(overlap) / den;
 }
@@ -98,9 +94,9 @@ public:
 
 		++_sample_count;
 		++_label_stats[label].sample_total;
-		_label_stats[label].feature_total += static_cast<uint32_t>(ctx.features.size());
+		_label_stats[label].feature_total += static_cast<uint32_t>(ctx.size());
 
-		for (const auto f : ctx.features) {
+		for (const auto f : ctx) {
 			++_feature_map[f][label];
 		}
 	}
@@ -121,7 +117,7 @@ public:
 
 		// todo: replace with global vocab_size?
 		const auto vocabulary_size = static_cast<double>(_feature_map.size());
-		for (const auto f : ctx.features) {
+		for (const auto f : ctx) {
 			const auto it = _feature_map.find(f);
 			if (it == _feature_map.end()) {
 				continue;
