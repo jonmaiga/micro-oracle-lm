@@ -68,10 +68,8 @@ inline double distance(const context& a, const context& b) {
 		return a.features.empty() && b.features.empty() ? 0. : 1.;
 	}
 
-	std::size_t i = 0;
-	std::size_t j = 0;
 	std::size_t overlap = 0;
-	while (i < a.features.size() && j < b.features.size()) {
+	for (std::size_t i = 0, j = 0; i < a.features.size() && j < b.features.size();) {
 		if (a.features[i] == b.features[j]) {
 			++overlap;
 			++i;
