@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <cstdint>
 #include <numeric>
 #include <random>
@@ -84,9 +85,19 @@ inline double distance(const context& a, const context& b) {
 	return 1. - static_cast<double>(overlap) / den;
 }
 
+inline double sample_radius(std::span<const event> events, std::span<const uint32_t> source, const context& center_ctx,
+                            std::uniform_int_distribution<std::size_t>& dist, std::mt19937_64& rng) {
+	double radius = 0.;
+	constexpr int radius_samples = 7;
+	for (int i = 0; i < radius_samples; ++i) {
+		radius += distance(events[source[dist(rng)]].ctx, center_ctx);
+	}
+	return radius / radius_samples;
+}
+
 class leaf_model {
 public:
-	explicit leaf_model(uint32_t vocab_size) : _vocab_size(vocab_size) {
+	explicit leaf_model(uint32_t vocab_size) : _label_stats(vocab_size) {
 	}
 
 	void observe(const context& ctx, token_id label) {
@@ -141,17 +152,14 @@ private:
 		uint32_t feature_total{};
 	};
 
-	uint32_t _vocab_size{};
 	uint32_t _sample_count{};
-	std::vector<label_stat> _label_stats{_vocab_size};
+	std::vector<label_stat> _label_stats;
 	// feature -> next_token->count
 	std::unordered_map<feature_id, std::unordered_map<token_id, uint32_t>> _feature_map;
 };
 
 class tree {
 public:
-	tree() = default;
-
 	tree(const config& cfg, uint64_t seed) :
 		_cfg(cfg), _seed(seed) {
 	}
@@ -224,16 +232,6 @@ private:
 		return static_cast<uint32_t>(node_index);
 	}
 
-	double sample_radius(std::span<const event> events, std::span<const uint32_t> source, const context& center_ctx,
-	                     std::uniform_int_distribution<std::size_t>& dist, std::mt19937_64& rng) const {
-		double radius = 0.;
-		constexpr int radius_samples = 7;
-		for (int i = 0; i < radius_samples; ++i) {
-			radius += distance(events[source[dist(rng)]].ctx, center_ctx);
-		}
-		return radius / radius_samples;
-	}
-
 	config _cfg;
 	uint64_t _seed{};
 	std::vector<node> _nodes;
@@ -248,9 +246,10 @@ public:
 	void train(const std::vector<std::vector<token_id>>& samples) {
 		_models.assign(_cfg.vocab_size, {});
 
+		std::vector<std::vector<event>> events(_cfg.vocab_size);
 		for (const auto& sample : samples) {
 			for (std::size_t i = 0; i + 1 < sample.size(); ++i) {
-				_models[sample[i]].events.push_back({
+				events[sample[i]].push_back({
 					make_context_at(sample, static_cast<uint32_t>(i), _cfg.context_size, _cfg.vocab_size),
 					sample[i + 1]
 				});
@@ -258,16 +257,17 @@ public:
 		}
 
 		for (token_id token = 0; token < _models.size(); ++token) {
-			auto& model = _models[token];
-			if (model.events.empty()) {
+			auto& token_events = events[token];
+			if (token_events.empty()) {
 				continue;
 			}
-			std::vector<uint32_t> indices(model.events.size());
+			std::vector<uint32_t> indices(token_events.size());
 			std::iota(indices.begin(), indices.end(), 0u);
-			model.trees.resize(_cfg.ensemble_size);
+			auto& trees = _models[token];
+			trees.reserve(_cfg.ensemble_size);
 			for (uint32_t t = 0; t < _cfg.ensemble_size; ++t) {
-				model.trees[t] = tree(_cfg, static_cast<uint64_t>(token) * 1009ull + t);
-				model.trees[t].build(model.events, indices);
+				auto& tr = trees.emplace_back(_cfg, static_cast<uint64_t>(token) * 1009ull + t);
+				tr.build(token_events, indices);
 			}
 		}
 	}
@@ -276,19 +276,19 @@ public:
 		assert(index_to_predict < tokens.size());
 
 		const auto current = tokens[index_to_predict];
-		if (current >= _models.size() || _models[current].trees.empty()) {
+		if (current >= _models.size() || _models[current].empty()) {
 			// todo: oov
 			return std::vector(_cfg.vocab_size, 1. / _cfg.vocab_size);
 		}
 
 		const auto ctx = make_context_at(tokens, index_to_predict, _cfg.context_size, _cfg.vocab_size);
-		const auto& model = _models[current];
+		const auto& trees = _models[current];
 
 		std::vector<double> probabilities(_cfg.vocab_size);
-		for (const auto& t : model.trees) {
+		for (const auto& t : trees) {
 			t.predict_into(ctx, probabilities);
 		}
-		const auto inv = 1. / static_cast<double>(model.trees.size());
+		const auto inv = 1. / static_cast<double>(trees.size());
 		for (auto& v : probabilities) {
 			v *= inv;
 		}
@@ -321,12 +321,7 @@ private:
 		}
 	}
 
-	struct token_model {
-		std::vector<event> events;
-		std::vector<tree> trees;
-	};
-
 	config _cfg;
-	std::vector<token_model> _models;
+	std::vector<std::vector<tree>> _models;
 };
 }
