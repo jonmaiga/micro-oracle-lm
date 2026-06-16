@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
+#include <numeric>
 #include <random>
 #include <span>
 #include <unordered_map>
@@ -268,9 +269,7 @@ public:
 				continue;
 			}
 			std::vector<uint32_t> indices(model.events.size());
-			for (uint32_t i = 0; i < indices.size(); ++i) {
-				indices[i] = i;
-			}
+			std::iota(indices.begin(), indices.end(), 0u);
 			model.trees.resize(_cfg.ensemble_size);
 			for (uint32_t t = 0; t < _cfg.ensemble_size; ++t) {
 				model.trees[t] = tree(_cfg, static_cast<uint64_t>(token) * 1009ull + t, &model.events);
