@@ -155,7 +155,6 @@ private:
 	std::unordered_map<feature_id, std::unordered_map<token_id, uint32_t>> _feature_map;
 };
 
-// One ball-tree over the events of a single current token.
 class tree {
 public:
 	tree() = default;
@@ -205,14 +204,14 @@ private:
 		std::mt19937_64 rng(_seed + depth * 16777619ull + event_count * 2166136261ull + _nodes.size());
 		const auto& center_ctx = (*_events)[event_indices[dist(rng)]].ctx;
 		const auto radius = sample_radius(event_indices, center_ctx, dist, rng);
-		const auto split = std::stable_partition(event_indices.begin(), event_indices.end(), [&](const auto index) {
+		const auto split = std::ranges::stable_partition(event_indices, [&](const auto index) {
 			return distance((*_events)[index].ctx, center_ctx) < radius;
 		});
-		const auto mid = static_cast<std::size_t>(split - event_indices.begin());
-		if (mid == 0 || mid == event_count) {
+		if (split.empty() || split.size() == event_count) {
 			return build_leaf(event_indices, depth);
 		}
 
+		const auto mid = static_cast<std::size_t>(split.begin() - event_indices.begin());
 		const auto node_index = _nodes.size();
 		_nodes.push_back({.leaf = false, .depth = depth, .center_context = center_ctx, .radius = radius});
 		_nodes[node_index].inner = build_node(event_indices.first(mid), depth + 1);
@@ -227,9 +226,9 @@ private:
 			const auto& e = (*_events)[index];
 			leaf.observe(e.ctx, e.next);
 		}
-		const auto node_index = static_cast<uint32_t>(_nodes.size());
+
 		_nodes.push_back({.leaf = true, .depth = depth, .leaf_index = leaf_index});
-		return node_index;
+		return static_cast<uint32_t>(_nodes.size() - 1);
 	}
 
 	double sample_radius(std::span<const uint32_t> source, const context& center_ctx,
