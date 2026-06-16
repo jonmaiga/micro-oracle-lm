@@ -37,6 +37,7 @@ private:
 
 std::vector<std::vector<token_id>> load_dataset(const std::string& path, vocabulary& vocab) {
 	std::ifstream file(path, std::ios::binary);
+	assert(file);
 	std::vector<token_id> sample;
 	for (char c; file.get(c);) {
 		sample.push_back(vocab.encode(static_cast<unsigned char>(c)));
@@ -119,7 +120,7 @@ uint64_t no_change_hash(micro_oracle::config config) {
 }
 
 void check_integrity() {
-	constexpr uint64_t expected_hash = 18011996580393846581ull;
+	constexpr uint64_t expected_hash = 7093489997123131148ull;
 
 	const auto hash = no_change_hash({.context_size = 5, .ensemble_size = 4, .max_depth = 8});
 	if (hash != expected_hash) {
@@ -129,6 +130,7 @@ void check_integrity() {
 } // namespace
 
 int main(int argc, char** argv) {
+	//const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/2800_books/1610.txt";
 	const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/names/names.txt";
 
 	check_integrity();

@@ -101,18 +101,19 @@ public:
 		}
 	}
 
+	// Adds this leaf's per-label log-probabilities into out (caller pre-sizes and
+	// zero-initializes), so an ensemble can sum across leaves without scratch.
 	void predict_into(const context& ctx, std::vector<double>& out, double smoothing) const {
 		assert(!_label_stats.empty());
 		assert(out.size() == _label_stats.size());
 		assert(_sample_count > 0);
 
-		std::ranges::fill(out, 0.);
 		const auto class_count = _label_stats.size();
 
 		const double prior_den = static_cast<double>(_sample_count) + smoothing * static_cast<double>(class_count);
 		for (std::size_t label = 0; label < class_count; ++label) {
 			const auto count = _label_stats[label].sample_total;
-			out[label] = std::log((static_cast<double>(count) + smoothing) / prior_den);
+			out[label] += std::log((static_cast<double>(count) + smoothing) / prior_den);
 		}
 
 		// todo: replace with global vocab_size?
@@ -284,12 +285,8 @@ public:
 		const auto& model = _models[current];
 
 		std::vector<double> probabilities(_cfg.vocab_size);
-		std::vector<double> local(_cfg.vocab_size, 0.);
 		for (const auto& t : model.trees) {
-			t.predict_into(ctx, local);
-			for (std::size_t i = 0; i < probabilities.size(); ++i) {
-				probabilities[i] += local[i];
-			}
+			t.predict_into(ctx, probabilities);
 		}
 		const auto inv = 1. / static_cast<double>(model.trees.size());
 		for (auto& v : probabilities) {
