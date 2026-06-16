@@ -94,37 +94,34 @@ public:
 	}
 
 	void observe(const context& ctx, token_id label) {
-		assert(label < _vocab_size);
+		assert(label < _label_stats.size());
 
 		++_sample_count;
-		++_label_count[label].count;
+		++_label_stats[label].sample_total;
 		for (const auto f : ctx.features) {
 			auto& counts = _feature_map[f];
-			if (counts.empty()) {
-				++_observed_feature_count;
-			}
 			++counts[label];
-			++_label_count[label].feature_total;
+			++_label_stats[label].feature_total;
 		}
 	}
 
 	void predict_into(const context& ctx, std::vector<double>& out, double smoothing) const {
-		assert(!_label_count.empty());
-		assert(out.size() == _label_count.size());
+		assert(!_label_stats.empty());
+		assert(out.size() == _label_stats.size());
 		assert(_sample_count > 0);
 
 		std::ranges::fill(out, 0.);
-		const auto class_count = _label_count.size();
+		const auto class_count = _label_stats.size();
 
 		const double prior_den = static_cast<double>(_sample_count) + smoothing * static_cast<double>(class_count);
 		for (std::size_t label = 0; label < class_count; ++label) {
-			const auto count = _label_count[label].count;
+			const auto count = _label_stats[label].sample_total;
 			out[label] = std::log((static_cast<double>(count) + smoothing) / prior_den);
 		}
 
 		// todo: replace with global vocab_size?
 		// todo: max is needed because we might train with empty samples now, e.g. when there is not prev context
-		const auto vocabulary_size = std::max<uint32_t>(1, _observed_feature_count);
+		const auto vocabulary_size = std::max(1., static_cast<double>(_feature_map.size()));
 		for (const auto f : ctx.features) {
 			const auto it = _feature_map.find(f);
 			if (it == _feature_map.end()) {
@@ -132,10 +129,10 @@ public:
 			}
 			const auto& counts = it->second;
 			for (std::size_t label = 0; label < class_count; ++label) {
-				const auto total = _label_count[label].feature_total;
+				const auto total = _label_stats[label].feature_total;
 				const auto cit = counts.find(static_cast<token_id>(label));
 				const auto count = cit != counts.end() ? cit->second : 0;
-				const double den = static_cast<double>(total) + smoothing * static_cast<double>(vocabulary_size);
+				const double den = static_cast<double>(total) + smoothing * vocabulary_size;
 				out[label] += std::log((static_cast<double>(count) + smoothing) / den);
 				assert(std::isfinite(out[label]));
 			}
@@ -144,14 +141,13 @@ public:
 
 private:
 	struct label_stat {
-		uint32_t count{};
+		uint32_t sample_total{};
 		uint32_t feature_total{};
 	};
 
 	uint32_t _vocab_size{};
 	uint32_t _sample_count{};
-	uint32_t _observed_feature_count{};
-	std::vector<label_stat> _label_count{std::vector<label_stat>(_vocab_size)};
+	std::vector<label_stat> _label_stats{_vocab_size};
 	std::unordered_map<feature_id, std::unordered_map<token_id, uint32_t>> _feature_map;
 };
 
