@@ -35,14 +35,14 @@ private:
 	std::vector<char> _token_to_char;
 };
 
-std::vector<std::vector<token_id>> load_dataset(const std::string& path, vocabulary& vocab) {
+std::vector<token_id> load_dataset(const std::string& path, vocabulary& vocab) {
 	std::ifstream file(path, std::ios::binary);
 	assert(file);
 	std::vector<token_id> sample;
 	for (char c; file.get(c);) {
 		sample.push_back(vocab.encode(static_cast<unsigned char>(c)));
 	}
-	return {std::move(sample)};
+	return sample;
 }
 
 
@@ -50,17 +50,17 @@ std::vector<std::vector<token_id>> load_dataset(const std::string& path, vocabul
 std::string generate(const micro_oracle::micro_oracle_lm& model, const vocabulary& vocab,
                      std::mt19937& rng, int num_tokens) {
 	std::vector<token_id> tokens{0};
-	std::string name;
+	std::string text;
 	for (int i = 0; i < num_tokens; ++i) {
 		const auto probabilities = model.predict(tokens, static_cast<uint32_t>(tokens.size() - 1));
 		assert(!probabilities.empty());
 
 		std::discrete_distribution<uint32_t> dist(probabilities.begin(), probabilities.end());
 		const token_id next = dist(rng);
-		name.push_back(vocab.decode(next));
+		text.push_back(vocab.decode(next));
 		tokens.push_back(next);
 	}
-	return name;
+	return text;
 }
 
 class random {
@@ -131,27 +131,28 @@ void check_integrity() {
 
 int main(int argc, char** argv) {
 	//const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/2800_books/1610.txt";
-	const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/names/names.txt";
+	const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/wiki_sentences/wikisent2.txt";
 
 	check_integrity();
 
 	vocabulary vocab;
-	const auto samples = load_dataset(path, vocab);
-	if (samples.empty()) {
+	const auto sample = load_dataset(path, vocab);
+	if (sample.empty()) {
 		std::cerr << "Failed to read any names from " << path << '\n';
 		return 1;
 	}
-	std::cout << "Loaded " << samples.size() << " names (vocab size " << vocab.size() << ").\n";
+	std::cout << "Loaded '" << path << "' vocab size: " << vocab.size() << ", bytes: " << sample.size() << ".\n";
 
 	micro_oracle::config cfg;
 	cfg.vocab_size = vocab.size();
+	cfg.softmax_temperature = 0.5;
 	micro_oracle::micro_oracle_lm model(cfg);
 
 	std::cout << "Training...\n";
-	model.train(samples);
+	model.train({sample});
 	std::cout << "Training complete. Generating:\n\n";
 
 	std::mt19937 rng(42);
-	std::cout << generate(model, vocab, rng, 1000) << '\n';
+	std::cout << generate(model, vocab, rng, 10000) << '\n';
 	return 0;
 }
