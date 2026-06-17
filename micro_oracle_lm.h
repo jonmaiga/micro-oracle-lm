@@ -22,6 +22,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include <omp.h>
+
 namespace micro_oracle {
 using token_id = uint32_t;
 using feature_id = uint64_t;
@@ -264,7 +266,11 @@ public:
 			}
 		}
 
-		for (token_id token = 0; token < _models.size(); ++token) {
+		// One independent ensemble per current token: distinct _models[token]
+		// elements, so the outer loop parallelizes without cross-thread sharing.
+		const int token_count = static_cast<int>(_models.size());
+		#pragma omp parallel for schedule(dynamic, 1)
+		for (int token = 0; token < token_count; ++token) {
 			auto& token_events = events[token];
 			if (token_events.empty()) {
 				continue;
