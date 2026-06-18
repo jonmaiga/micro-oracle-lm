@@ -210,7 +210,7 @@ private:
 	uint32_t build_node(std::span<const event> events, std::span<uint32_t> event_indices, uint32_t depth) {
 		const auto event_count = event_indices.size();
 		if (depth >= _cfg.max_depth || event_count < 2) {
-			return build_leaf(events, event_indices, depth);
+			return build_leaf(events, event_indices);
 		}
 
 		std::uniform_int_distribution<std::size_t> dist(0, event_count - 1);
@@ -221,7 +221,7 @@ private:
 			return distance(events[index].ctx(_cfg.context_size, _cfg.vocab_size), center_ctx) < radius;
 		});
 		if (split.empty() || split.size() == event_count) {
-			return build_leaf(events, event_indices, depth);
+			return build_leaf(events, event_indices);
 		}
 
 		const auto mid = static_cast<std::size_t>(split.begin() - event_indices.begin());
@@ -232,7 +232,7 @@ private:
 		return static_cast<uint32_t>(node_index);
 	}
 
-	uint32_t build_leaf(std::span<const event> events, std::span<const uint32_t> source, uint32_t depth) {
+	uint32_t build_leaf(std::span<const event> events, std::span<const uint32_t> source) {
 		const auto leaf_index = static_cast<uint32_t>(_leaves.size());
 		auto& leaf = _leaves.emplace_back(_cfg.vocab_size);
 		for (const auto index : source) {
@@ -250,7 +250,6 @@ private:
 	std::vector<node> _nodes;
 	std::vector<leaf_model> _leaves;
 };
-
 class micro_oracle_lm {
 public:
 	explicit micro_oracle_lm(const config& cfg) : _cfg(cfg) {
