@@ -22,8 +22,6 @@
 #include <unordered_map>
 #include <vector>
 
-#include <omp.h>
-
 namespace micro_oracle {
 using token_id = uint32_t;
 using feature_id = uint64_t;
@@ -44,7 +42,7 @@ inline feature_id make_feature(token_id token, uint32_t distance, uint32_t vocab
 }
 
 inline context make_context_at(const std::vector<token_id>& tokens, uint32_t index,
-							   uint32_t context_size, uint32_t vocab_size) {
+                               uint32_t context_size, uint32_t vocab_size) {
 	context ctx;
 	const auto start = index > context_size ? index - context_size : 0;
 	const uint32_t count = index - start;
@@ -98,8 +96,8 @@ inline double distance(const context& a, const context& b) {
 }
 
 inline double sample_radius(std::span<const event> events, std::span<const uint32_t> source, const context& center_ctx,
-							std::uniform_int_distribution<std::size_t>& dist, std::mt19937_64& rng,
-							uint32_t context_size, uint32_t vocab_size) {
+                            std::uniform_int_distribution<std::size_t>& dist, std::mt19937_64& rng,
+                            uint32_t context_size, uint32_t vocab_size) {
 	double radius = 0.;
 	constexpr int radius_samples = 7;
 	for (int i = 0; i < radius_samples; ++i) {
@@ -250,6 +248,7 @@ private:
 	std::vector<node> _nodes;
 	std::vector<leaf_model> _leaves;
 };
+
 class micro_oracle_lm {
 public:
 	explicit micro_oracle_lm(const config& cfg) : _cfg(cfg) {
@@ -268,7 +267,7 @@ public:
 		// One independent ensemble per current token: distinct _models[token]
 		// elements, so the outer loop parallelizes without cross-thread sharing.
 		const int token_count = static_cast<int>(_models.size());
-		#pragma omp parallel for schedule(dynamic, 1)
+#pragma omp parallel for schedule(dynamic, 1)
 		for (int token = 0; token < token_count; ++token) {
 			auto& token_events = events[token];
 			if (token_events.empty()) {
