@@ -61,18 +61,14 @@ inline feature_id make_feature(token_id token, uint32_t distance, uint32_t vocab
 }
 
 // Non-owning, lazily evaluated view over the context preceding a position in a
-// token sequence (together with the label that follows it). Features are yielded
-// in ascending-distance order and computed on access instead of stored, so the
-// hot training path needs no per-event allocation. When an owning copy is
-// required (e.g. a node center kept for routing) it can materialize() a context.
 struct context_view {
 	const std::vector<token_id>* tokens{};
+	uint32_t view_size{};
 	uint32_t index{};
-	uint32_t context_size{};
 	uint32_t vocab_size{};
 
 	std::size_t size() const {
-		return index < context_size ? index : context_size;
+		return view_size;
 	}
 
 	bool empty() const {
@@ -88,6 +84,13 @@ struct context_view {
 		return (*tokens)[index + 1];
 	}
 };
+
+
+inline context_view make_context_view(const std::vector<token_id>& tokens, uint32_t index,
+                                      uint32_t context_size, uint32_t vocab_size) {
+	const uint32_t count = index < context_size ? index : context_size;
+	return {.tokens = &tokens, .view_size = count, .index = index, .vocab_size = vocab_size};
+}
 
 inline context materialize(const context_view& view) {
 	context ctx;
@@ -277,7 +280,7 @@ inline oracle_forest build_oracle_forest(const oracle_forest_config& cfg, const 
 	std::vector<std::vector<context_view>> token_contexts(cfg.vocab_size);
 	for (const auto& sample : samples) {
 		for (std::size_t i = 0; i + 1 < sample.size(); ++i) {
-			token_contexts[sample[i]].push_back({&sample, static_cast<uint32_t>(i), cfg.context_size, cfg.vocab_size});
+			token_contexts[sample[i]].push_back(make_context_view(sample, static_cast<uint32_t>(i), cfg.context_size, cfg.vocab_size));
 		}
 	}
 
@@ -313,7 +316,7 @@ inline std::vector<double> predict(const oracle_forest& forest, const std::vecto
 		return std::vector(cfg.vocab_size, 1. / cfg.vocab_size);
 	}
 
-	const auto ctx = materialize({.tokens = &tokens, .index = index_to_predict, .context_size = cfg.context_size, .vocab_size = cfg.vocab_size});
+	const auto ctx = materialize(make_context_view(tokens, index_to_predict, cfg.context_size, cfg.vocab_size));
 	const auto& trees = forest.trees[current];
 
 	std::vector<double> probabilities(cfg.vocab_size);
