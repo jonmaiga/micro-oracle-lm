@@ -19,13 +19,13 @@ using context = std::vector<feature_id>;
 
 struct oracle_leaf {
 	struct prior_counts {
-		uint32_t sample_total{};
-		uint32_t feature_total{};
+		uint32_t sample_count{};
+		uint32_t feature_count{};
 	};
 
 	uint32_t sample_count{};
 	std::vector<prior_counts> target_prior_counts;
-	std::unordered_map<feature_id, std::unordered_map<token_id, uint32_t>> _feature_map; // feature -> next_token->count
+	std::unordered_map<feature_id, std::unordered_map<token_id, uint32_t>> _feature_map; // feature -> target->count
 };
 
 struct oracle_node {
@@ -63,7 +63,6 @@ inline feature_id make_feature(token_id token, uint32_t distance, uint32_t vocab
 	return static_cast<feature_id>(token) + static_cast<feature_id>(distance) * vocab_size;
 }
 
-// Non-owning, lazily evaluated view over the context preceding a position in a
 struct context_view {
 	const std::vector<token_id>* tokens{};
 	uint32_t view_size{};
@@ -126,10 +125,6 @@ inline std::vector<double> softmax_normalize(const std::vector<double>& logits, 
 	return probabilities;
 }
 
-// Cosine distance over the (binary) feature sets. Both feature lists are sorted
-// by construction, so overlap is a linear merge. Templated so it works on both
-// owning contexts and lazy context_views without forcing materialization.
-// Named context_distance (not distance) to avoid ADL collision with std::distance.
 template <class A, class B>
 double context_distance(const A& a, const B& b) {
 	if (a.empty() || b.empty()) {
@@ -162,8 +157,8 @@ inline void train(oracle_leaf& leaf, const context_view& ctx, token_id target) {
 	assert(target < leaf.target_prior_counts.size());
 
 	++leaf.sample_count;
-	++leaf.target_prior_counts[target].sample_total;
-	leaf.target_prior_counts[target].feature_total += static_cast<uint32_t>(ctx.size());
+	++leaf.target_prior_counts[target].sample_count;
+	leaf.target_prior_counts[target].feature_count += static_cast<uint32_t>(ctx.size());
 
 	for (std::size_t i = 0; i < ctx.size(); ++i) {
 		++leaf._feature_map[ctx[i]][target];
@@ -179,7 +174,7 @@ inline std::vector<double> predict_logits(const oracle_leaf& leaf, const context
 
 	const double prior_den = static_cast<double>(leaf.sample_count) + smoothing * static_cast<double>(targets);
 	for (std::size_t target = 0; target < targets; ++target) {
-		const auto sample_count = leaf.target_prior_counts[target].sample_total;
+		const auto sample_count = leaf.target_prior_counts[target].sample_count;
 		logits[target] = std::log((static_cast<double>(sample_count) + smoothing) / prior_den);
 	}
 
@@ -192,7 +187,7 @@ inline std::vector<double> predict_logits(const oracle_leaf& leaf, const context
 		}
 		const auto& counts = it->second;
 		for (token_id target = 0; target < targets; ++target) {
-			const auto total = leaf.target_prior_counts[target].feature_total;
+			const auto total = leaf.target_prior_counts[target].feature_count;
 			const auto cit = counts.find(target);
 			const auto count = cit != counts.end() ? cit->second : 0;
 			const double den = static_cast<double>(total) + smoothing * vocabulary_size;
