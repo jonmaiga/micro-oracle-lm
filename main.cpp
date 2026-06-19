@@ -49,7 +49,6 @@ std::vector<token_id> load_dataset(const std::string& path, vocabulary& vocab) {
 }
 
 
-// Samples a single name by repeatedly predicting the next token until the
 std::string generate(
 	const of::oracle_forest& forest,
 	const vocabulary& vocab,
@@ -62,51 +61,33 @@ std::string generate(
 		const auto probabilities = predict(forest, tokens, static_cast<uint32_t>(tokens.size() - 1), softmax_temperature);
 		assert(!probabilities.empty());
 
-		std::discrete_distribution<uint32_t> dist(probabilities.begin(), probabilities.end());
-		const token_id next = dist(rng);
+		std::discrete_distribution<uint32_t> token_dist(probabilities.begin(), probabilities.end());
+		const token_id next = token_dist(rng);
 		text.push_back(vocab.decode(next));
 		tokens.push_back(next);
 	}
 	return text;
 }
 
-class random {
-public:
-	explicit random(uint64_t seed) : _state(seed) {
-	}
-
-	uint64_t next() {
-		_state ^= _state << 13;
-		_state ^= _state >> 7;
-		_state ^= _state << 17;
-		return _state;
-	}
-
-	uint32_t between(uint32_t lo, uint32_t hi) {
-		return lo + static_cast<uint32_t>(next() % (hi - lo + 1));
-	}
-
-private:
-	uint64_t _state{};
-};
-
-std::vector<token_id> random_tokens(random& r, uint32_t length, uint32_t vocab_size) {
+std::vector<token_id> random_tokens(mx3random& r, uint32_t length, uint32_t vocab_size) {
+	std::uniform_int_distribution<token_id> token_dist(0, vocab_size - 1);
 	std::vector<token_id> tokens;
 	tokens.reserve(length);
 	for (uint32_t i = 0; i < length; ++i) {
-		tokens.push_back(r.between(0, vocab_size - 1));
+		tokens.push_back(token_dist(r));
 	}
 	return tokens;
 }
 
 uint64_t no_change_hash(of::oracle_forest_config config) {
 	constexpr uint32_t vocab_size = 20;
-	random r(1234);
+	mx3random r(1234);
+	std::uniform_int_distribution<uint32_t> sample_size_dist(0, 50);
 
 	std::vector<std::vector<token_id>> samples;
 	samples.reserve(200);
 	for (int i = 0; i < 200; ++i) {
-		samples.push_back(random_tokens(r, r.between(0, 50), vocab_size));
+		samples.push_back(random_tokens(r, sample_size_dist(r), vocab_size));
 	}
 
 	config.vocab_size = vocab_size;
@@ -115,7 +96,7 @@ uint64_t no_change_hash(of::oracle_forest_config config) {
 
 	uint64_t hash = 1;
 	for (int i = 0; i < 1000; ++i) {
-		const auto tokens = random_tokens(r, r.between(0, 60), vocab_size);
+		const auto tokens = random_tokens(r, sample_size_dist(r), vocab_size);
 		for (uint32_t pos = 0; pos < tokens.size(); ++pos) {
 			for (const auto value : of::predict(forest, tokens, pos, 1.0)) {
 				hash ^= std::hash<double>{}(value);
@@ -126,7 +107,7 @@ uint64_t no_change_hash(of::oracle_forest_config config) {
 }
 
 void check_integrity() {
-	constexpr uint64_t expected_hash = 2760852664307949450ull;
+	constexpr uint64_t expected_hash = 10252349082775225901ull;
 
 	const auto hash = no_change_hash({.context_size = 5, .max_depth = 8, .ensemble_size = 4});
 	if (hash != expected_hash) {
@@ -188,8 +169,8 @@ void evaluate_held_out_bpb(const of::oracle_forest_config& base_cfg, const std::
 int main(int argc, char** argv) {
 	using namespace std::chrono_literals;
 	//const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/tiny_stories/TinyStoriesV2.txt";
-	//const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/names/names.txt";
-	const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/2800_books/1610.txt";
+	const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/names/names.txt";
+	//const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/2800_books/1610.txt";
 	//const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/wiki_sentences/wikisent2.txt";
 
 	check_integrity();
