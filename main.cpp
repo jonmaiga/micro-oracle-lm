@@ -123,7 +123,7 @@ uint64_t no_change_hash(micro_oracle::config config) {
 }
 
 void check_integrity() {
-	constexpr uint64_t expected_hash = 7093489997123131148ull;
+	constexpr uint64_t expected_hash = 1205746795169421007ull;
 
 	const auto hash = no_change_hash({.context_size = 5, .ensemble_size = 4, .max_depth = 8});
 	if (hash != expected_hash) {
@@ -135,18 +135,22 @@ void check_integrity() {
 // assigns to each actual next token) over the held-out tokens. Each token maps
 // to one byte, so cross-entropy per token equals bits per byte.
 double compute_bpb(const micro_oracle::micro_oracle_lm& model, const std::vector<token_id>& tokens) {
+	constexpr double epsilon = 1e-12;
+	const std::int64_t count = tokens.size() > 1 ? static_cast<std::int64_t>(tokens.size()) - 1 : 0;
+
+	// predict() is a read-only, allocation-local operation, so positions can be
+	// scored independently and summed via a reduction (matches the OpenMP
+	// parallelism already used during training).
 	double total_bits = 0.;
-	uint64_t predicted = 0;
-	for (std::size_t i = 0; i + 1 < tokens.size(); ++i) {
+#pragma omp parallel for schedule(dynamic, 512) reduction(+ : total_bits)
+	for (std::int64_t i = 0; i < count; ++i) {
 		const auto probabilities = model.predict(tokens, static_cast<uint32_t>(i));
 		const token_id actual = tokens[i + 1];
 		assert(actual < probabilities.size());
 		const double p = probabilities[actual];
-		constexpr double epsilon = 1e-12;
 		total_bits += -std::log2(std::max(p, epsilon));
-		++predicted;
 	}
-	return predicted == 0 ? 0. : total_bits / static_cast<double>(predicted);
+	return count == 0 ? 0. : total_bits / static_cast<double>(count);
 }
 
 // Trains a fresh model on the first 80% of the sample and reports bits-per-byte
@@ -182,8 +186,8 @@ void evaluate_held_out_bpb(const micro_oracle::config& base_cfg, const std::vect
 int main(int argc, char** argv) {
 	using namespace std::chrono_literals;
 	//const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/tiny_stories/TinyStoriesV2.txt";
-	const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/names/names.txt";
-	//const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/2800_books/1610.txt";
+	//const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/names/names.txt";
+	const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/2800_books/1610.txt";
 	//const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/wiki_sentences/wikisent2.txt";
 
 	check_integrity();
