@@ -1,15 +1,3 @@
-// micro_oracle_lm.h
-//
-// Minimal, self-contained single-header version of the fast HSROE language
-// model. One small ensemble of ball-trees is built per current token. Each
-// tree recursively splits its training events by cosine distance to a random
-// center context; leaves hold Naive-Bayes label/feature counts. Prediction
-// routes the context through every tree, averages the per-tree log-probs, and
-// applies a softmax.
-//
-// Standalone: depends only on the C++ standard library. No introspection,
-// ensemble routing hashes, or debug output.
-
 #pragma once
 
 #include <algorithm>
@@ -36,7 +24,6 @@ struct config {
 	double softmax_temperature{1.};
 };
 
-// Encodes "previous token at a given backward distance" into one id.
 inline feature_id make_feature(token_id token, uint32_t distance, uint32_t vocab_size) {
 	return static_cast<feature_id>(token) + static_cast<feature_id>(distance) * vocab_size;
 }
@@ -68,6 +55,24 @@ struct event {
 		return (*tokens)[index + 1];
 	}
 };
+
+inline void softmax_normalize(std::vector<double>& values, double temperature) {
+	assert(temperature > 0);
+	assert(std::isfinite(temperature));
+
+	const auto max_log = *std::ranges::max_element(values);
+	double sum = 0.;
+	for (auto& v : values) {
+		v = std::exp((v - max_log) / temperature);
+		sum += v;
+	}
+	assert(sum > 0.0);
+	assert(std::isfinite(sum));
+
+	for (auto& v : values) {
+		v /= sum;
+	}
+}
 
 // Cosine distance over the (binary) feature sets. Both feature lists are sorted
 // by construction, so overlap is a linear merge.
@@ -305,7 +310,7 @@ public:
 			v *= inv;
 		}
 
-		softmax_normalize(probabilities);
+		softmax_normalize(probabilities, _cfg.softmax_temperature);
 
 		return probabilities;
 	}
@@ -315,24 +320,6 @@ public:
 	}
 
 private:
-	void softmax_normalize(std::vector<double>& values) const {
-		assert(_cfg.softmax_temperature > 0);
-		assert(std::isfinite(_cfg.softmax_temperature));
-
-		const auto max_log = *std::ranges::max_element(values);
-		double sum = 0.;
-		for (auto& v : values) {
-			v = std::exp((v - max_log) / _cfg.softmax_temperature);
-			sum += v;
-		}
-		assert(sum > 0.0);
-		assert(std::isfinite(sum));
-
-		for (auto& v : values) {
-			v /= sum;
-		}
-	}
-
 	config _cfg;
 	std::vector<std::vector<tree>> _models;
 };
