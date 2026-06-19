@@ -104,25 +104,26 @@ inline context materialize(const context_view& view) {
 	return ctx;
 }
 
-inline std::vector<double> softmax_normalize(const std::vector<double>& values, double temperature) {
+inline std::vector<double> softmax_normalize(const std::vector<double>& logits, double temperature) {
 	assert(temperature > 0);
 	assert(std::isfinite(temperature));
+	assert(!logits.empty());
 
-	std::vector<double> result(values.size());
-	const auto max_log = *std::ranges::max_element(values);
+	std::vector<double> probabilities(logits.size());
+	const auto max_logit = *std::ranges::max_element(logits);
 	double sum = 0.;
-	for (std::size_t i = 0; i < values.size(); ++i) {
-		const auto v = std::exp((values[i] - max_log) / temperature);
-		result[i] = v;
+	for (std::size_t i = 0; i < logits.size(); ++i) {
+		const auto v = std::exp((logits[i] - max_logit) / temperature);
+		probabilities[i] = v;
 		sum += v;
 	}
 	assert(sum > 0.0);
 	assert(std::isfinite(sum));
 
-	for (auto& v : result) {
+	for (auto& v : probabilities) {
 		v /= sum;
 	}
-	return result;
+	return probabilities;
 }
 
 // Cosine distance over the (binary) feature sets. Both feature lists are sorted
@@ -137,6 +138,9 @@ double context_distance(const A& a, const B& b) {
 
 	std::size_t overlap = 0;
 	for (std::size_t i = 0, j = 0; i < a.size() && j < b.size();) {
+		assert(i == 0 || a[i - 1] <= a[i]);
+		assert(j == 0 || b[j - 1] <= b[j]);
+
 		if (a[i] == b[j]) {
 			++overlap;
 			++i;
