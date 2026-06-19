@@ -29,13 +29,16 @@ struct oracle_leaf {
 };
 
 struct oracle_node {
-	bool leaf{true};
 	context center_context;
 	double radius{};
 	uint32_t inner{};
 	uint32_t outer{};
-	uint32_t leaf_index{};
+	uint32_t leaf_index{std::numeric_limits<uint32_t>::max()};
 };
+
+inline bool is_leaf(const oracle_node& node) {
+	return node.leaf_index != std::numeric_limits<uint32_t>::max();
+}
 
 struct oracle_tree {
 	std::vector<oracle_node> nodes;
@@ -212,7 +215,7 @@ inline uint32_t build_leaf(oracle_tree& tree, const oracle_forest_config& cfg,
 	}
 
 	const auto node_index = tree.nodes.size();
-	tree.nodes.push_back({.leaf = true, .leaf_index = leaf_index});
+	tree.nodes.push_back({.leaf_index = leaf_index});
 	return static_cast<uint32_t>(node_index);
 }
 
@@ -243,7 +246,7 @@ inline uint32_t build_tree_recursively(oracle_tree& tree, const oracle_forest_co
 	const auto mid = static_cast<std::size_t>(split.begin() - partition.begin());
 	auto& nodes = tree.nodes;
 	const auto node_index = nodes.size();
-	nodes.push_back({.leaf = false, .center_context = center_ctx, .radius = radius});
+	nodes.push_back({.center_context = center_ctx, .radius = radius});
 	nodes[node_index].inner = build_tree_recursively(tree, cfg, contexts, partition.first(mid), depth + 1, rng);
 	nodes[node_index].outer = build_tree_recursively(tree, cfg, contexts, partition.subspan(mid), depth + 1, rng);
 	return static_cast<uint32_t>(node_index);
@@ -258,7 +261,7 @@ inline oracle_tree build_tree(const oracle_forest_config& cfg, const std::vector
 
 inline uint32_t route(const oracle_tree& tree, const context_view& ctx) {
 	uint32_t node_index = 0;
-	while (!tree.nodes[node_index].leaf) {
+	while (!is_leaf(tree.nodes[node_index])) {
 		const auto& n = tree.nodes[node_index];
 		node_index = context_distance(ctx, n.center_context) < n.radius ? n.inner : n.outer;
 	}
