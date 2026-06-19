@@ -72,12 +72,40 @@ inline context make_context_at(const std::vector<token_id>& tokens, uint32_t ind
 	return ctx;
 }
 
+// Non-owning, lazily evaluated view over an event's context. Yields the same
+// features in the same ascending-distance order as make_context_at, but computes
+// them on access instead of allocating a vector. Used on the hot training path
+// to avoid a heap allocation per event.
+struct context_view {
+	const std::vector<token_id>* tokens{};
+	uint32_t index{};
+	uint32_t context_size{};
+	uint32_t vocab_size{};
+
+	std::size_t size() const {
+		return index < context_size ? index : context_size;
+	}
+
+	bool empty() const {
+		return size() == 0;
+	}
+
+	feature_id operator[](std::size_t i) const {
+		const uint32_t distance = static_cast<uint32_t>(i) + 1;
+		return make_feature((*tokens)[index - distance], distance, vocab_size);
+	}
+};
+
 struct event {
 	const std::vector<token_id>* tokens{};
 	uint32_t index{};
 
 	context ctx(uint32_t context_size, uint32_t vocab_size) const {
 		return make_context_at(*tokens, index, context_size, vocab_size);
+	}
+
+	context_view view(uint32_t context_size, uint32_t vocab_size) const {
+		return {tokens, index, context_size, vocab_size};
 	}
 
 	token_id next() const {
@@ -107,8 +135,11 @@ inline std::vector<double> softmax_normalize(const std::vector<double>& values, 
 }
 
 // Cosine distance over the (binary) feature sets. Both feature lists are sorted
-// by construction, so overlap is a linear merge.
-inline double distance(const context& a, const context& b) {
+// by construction, so overlap is a linear merge. Templated so it works on both
+// owning contexts and lazy context_views without forcing materialization.
+// Named context_distance (not distance) to avoid ADL collision with std::distance.
+template <class A, class B>
+double context_distance(const A& a, const B& b) {
 	if (a.empty() || b.empty()) {
 		return a.empty() && b.empty() ? 0. : 1.;
 	}
@@ -132,15 +163,16 @@ inline double distance(const context& a, const context& b) {
 	return 1. - static_cast<double>(overlap) / den;
 }
 
-inline void train(oracle_leaf& leaf, const context& ctx, token_id label) {
+template <class Range>
+void train(oracle_leaf& leaf, const Range& ctx, token_id label) {
 	assert(label < leaf.label_stats.size());
 
 	++leaf.sample_count;
 	++leaf.label_stats[label].sample_total;
 	leaf.label_stats[label].feature_total += static_cast<uint32_t>(ctx.size());
 
-	for (const auto f : ctx) {
-		++leaf._feature_map[f][label];
+	for (std::size_t i = 0; i < ctx.size(); ++i) {
+		++leaf._feature_map[ctx[i]][label];
 	}
 }
 
@@ -189,7 +221,7 @@ inline uint32_t build_leaf(oracle_tree& tree, const oracle_forest_config& cfg,
 	leaf.label_stats.resize(cfg.vocab_size);
 	for (const auto index : source) {
 		const auto& e = events[index];
-		train(leaf, e.ctx(cfg.context_size, cfg.vocab_size), e.next());
+		train(leaf, e.view(cfg.context_size, cfg.vocab_size), e.next());
 	}
 
 	const auto node_index = tree.nodes.size();
@@ -209,12 +241,12 @@ inline uint32_t build_tree_recursively(oracle_tree& tree, const oracle_forest_co
 	constexpr int radius_samples = 7;
 	double radius = 0.;
 	for (int i = 0; i < 7; ++i) {
-		radius += distance(events[event_indices[dist(rng)]].ctx(cfg.context_size, cfg.vocab_size), center_ctx);
+		radius += context_distance(events[event_indices[dist(rng)]].view(cfg.context_size, cfg.vocab_size), center_ctx);
 	}
 	radius /= radius_samples;
 
 	const auto split = std::ranges::stable_partition(event_indices, [&](const auto index) {
-		return distance(events[index].ctx(cfg.context_size, cfg.vocab_size), center_ctx) < radius;
+		return context_distance(events[index].view(cfg.context_size, cfg.vocab_size), center_ctx) < radius;
 	});
 	if (split.empty() || split.size() == event_count) {
 		return build_leaf(tree, cfg, events, event_indices);
@@ -240,7 +272,7 @@ inline uint32_t route(const oracle_tree& tree, const context& ctx) {
 	uint32_t node_index = 0;
 	while (!tree.nodes[node_index].leaf) {
 		const auto& n = tree.nodes[node_index];
-		node_index = distance(ctx, n.center_context) < n.radius ? n.inner : n.outer;
+		node_index = context_distance(ctx, n.center_context) < n.radius ? n.inner : n.outer;
 	}
 	return node_index;
 }
