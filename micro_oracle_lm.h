@@ -4,6 +4,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <numeric>
 #include <random>
 #include <span>
@@ -18,13 +19,13 @@ using feature_id = uint64_t;
 using context = std::vector<feature_id>;
 
 struct oracle_leaf {
-	struct prior_counts {
+	struct target_stat {
 		uint32_t sample_count{};
 		uint32_t feature_count{};
 	};
 
 	uint32_t sample_count{};
-	std::vector<prior_counts> target_prior_counts;
+	std::vector<target_stat> target_stats;
 	std::unordered_map<feature_id, std::unordered_map<token_id, uint32_t>> _feature_map; // feature -> target->count
 };
 
@@ -84,6 +85,7 @@ struct context_view {
 	}
 
 	token_id next_token() const {
+		assert(index + 1 < tokens->size());
 		return (*tokens)[index + 1];
 	}
 };
@@ -155,11 +157,11 @@ double context_distance(const A& a, const B& b) {
 }
 
 inline void train(oracle_leaf& leaf, const context_view& ctx, token_id target) {
-	assert(target < leaf.target_prior_counts.size());
+	assert(target < leaf.target_stats.size());
 
 	++leaf.sample_count;
-	++leaf.target_prior_counts[target].sample_count;
-	leaf.target_prior_counts[target].feature_count += static_cast<uint32_t>(ctx.size());
+	++leaf.target_stats[target].sample_count;
+	leaf.target_stats[target].feature_count += static_cast<uint32_t>(ctx.size());
 
 	for (std::size_t i = 0; i < ctx.size(); ++i) {
 		++leaf._feature_map[ctx[i]][target];
@@ -167,15 +169,15 @@ inline void train(oracle_leaf& leaf, const context_view& ctx, token_id target) {
 }
 
 inline std::vector<double> predict_logits(const oracle_leaf& leaf, const context_view& ctx, double smoothing) {
-	assert(!leaf.target_prior_counts.empty());
+	assert(!leaf.target_stats.empty());
 	assert(leaf.sample_count > 0);
 
-	const auto targets = leaf.target_prior_counts.size();
+	const auto targets = leaf.target_stats.size();
 	std::vector<double> logits(targets);
 
 	const double prior_den = static_cast<double>(leaf.sample_count) + smoothing * static_cast<double>(targets);
 	for (std::size_t target = 0; target < targets; ++target) {
-		const auto sample_count = leaf.target_prior_counts[target].sample_count;
+		const auto sample_count = leaf.target_stats[target].sample_count;
 		logits[target] = std::log((static_cast<double>(sample_count) + smoothing) / prior_den);
 	}
 
@@ -188,7 +190,7 @@ inline std::vector<double> predict_logits(const oracle_leaf& leaf, const context
 		}
 		const auto& counts = it->second;
 		for (token_id target = 0; target < targets; ++target) {
-			const auto total = leaf.target_prior_counts[target].feature_count;
+			const auto total = leaf.target_stats[target].feature_count;
 			const auto cit = counts.find(target);
 			const auto count = cit != counts.end() ? cit->second : 0;
 			const double den = static_cast<double>(total) + smoothing * vocabulary_size;
@@ -206,7 +208,7 @@ inline uint32_t build_leaf(oracle_tree& tree, const oracle_forest_config& cfg,
                            std::span<const uint32_t> partition) {
 	const auto leaf_index = static_cast<uint32_t>(tree.leaves.size());
 	auto& leaf = tree.leaves.emplace_back();
-	leaf.target_prior_counts.resize(cfg.vocab_size);
+	leaf.target_stats.resize(cfg.vocab_size);
 	for (const auto index : partition) {
 		const auto& context = context_views[index];
 		train(leaf, context, context.next_token());
@@ -229,7 +231,7 @@ inline uint32_t build_tree_recursively(oracle_tree& tree, const oracle_forest_co
 	const auto center_ctx = contexts[partition[dist(rng)]];
 	constexpr int radius_samples = 7;
 	double radius = 0.;
-	for (int i = 0; i < 7; ++i) {
+	for (int i = 0; i < radius_samples; ++i) {
 		radius += context_distance(contexts[partition[dist(rng)]], center_ctx);
 	}
 	radius /= radius_samples;
