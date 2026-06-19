@@ -60,22 +60,11 @@ inline feature_id make_feature(token_id token, uint32_t distance, uint32_t vocab
 	return static_cast<feature_id>(token) + static_cast<feature_id>(distance) * vocab_size;
 }
 
-inline context make_context_at(const std::vector<token_id>& tokens, uint32_t index,
-                               uint32_t context_size, uint32_t vocab_size) {
-	context ctx;
-	const auto start = index > context_size ? index - context_size : 0;
-	const uint32_t count = index - start;
-	ctx.reserve(count);
-	for (uint32_t distance = 1; distance <= count; ++distance) {
-		ctx.push_back(make_feature(tokens[index - distance], distance, vocab_size));
-	}
-	return ctx;
-}
-
-// Non-owning, lazily evaluated view over an event's context. Yields the same
-// features in the same ascending-distance order as make_context_at, but computes
-// them on access instead of allocating a vector. Used on the hot training path
-// to avoid a heap allocation per event.
+// Non-owning, lazily evaluated view over the context preceding a position in a
+// token sequence (together with the label that follows it). Features are yielded
+// in ascending-distance order and computed on access instead of stored, so the
+// hot training path needs no per-event allocation. When an owning copy is
+// required (e.g. a node center kept for routing) it can materialize() a context.
 struct context_view {
 	const std::vector<token_id>* tokens{};
 	uint32_t index{};
@@ -94,22 +83,19 @@ struct context_view {
 		const uint32_t distance = static_cast<uint32_t>(i) + 1;
 		return make_feature((*tokens)[index - distance], distance, vocab_size);
 	}
-};
-
-struct event {
-	const std::vector<token_id>* tokens{};
-	uint32_t index{};
-
-	context ctx(uint32_t context_size, uint32_t vocab_size) const {
-		return make_context_at(*tokens, index, context_size, vocab_size);
-	}
-
-	context_view view(uint32_t context_size, uint32_t vocab_size) const {
-		return {tokens, index, context_size, vocab_size};
-	}
 
 	token_id next() const {
 		return (*tokens)[index + 1];
+	}
+
+	context materialize() const {
+		context ctx;
+		const auto n = size();
+		ctx.reserve(n);
+		for (std::size_t i = 0; i < n; ++i) {
+			ctx.push_back((*this)[i]);
+		}
+		return ctx;
 	}
 };
 
@@ -214,14 +200,14 @@ inline std::vector<double> predict(const oracle_leaf& leaf, const context& ctx, 
 
 
 inline uint32_t build_leaf(oracle_tree& tree, const oracle_forest_config& cfg,
-                           std::span<const event> events,
-                           std::span<const uint32_t> source) {
+						   std::span<const context_view> events,
+						   std::span<const uint32_t> source) {
 	const auto leaf_index = static_cast<uint32_t>(tree.leaves.size());
 	auto& leaf = tree.leaves.emplace_back();
 	leaf.label_stats.resize(cfg.vocab_size);
 	for (const auto index : source) {
 		const auto& e = events[index];
-		train(leaf, e.view(cfg.context_size, cfg.vocab_size), e.next());
+		train(leaf, e, e.next());
 	}
 
 	const auto node_index = tree.nodes.size();
@@ -230,23 +216,23 @@ inline uint32_t build_leaf(oracle_tree& tree, const oracle_forest_config& cfg,
 }
 
 inline uint32_t build_tree_recursively(oracle_tree& tree, const oracle_forest_config& cfg,
-                                       std::span<const event> events, std::span<uint32_t> event_indices, uint32_t depth, mx3random& rng) {
+									   std::span<const context_view> events, std::span<uint32_t> event_indices, uint32_t depth, mx3random& rng) {
 	const auto event_count = event_indices.size();
 	if (depth >= cfg.max_depth || event_count < 2) {
 		return build_leaf(tree, cfg, events, event_indices);
 	}
 
 	std::uniform_int_distribution<std::size_t> dist(0, event_count - 1);
-	const auto center_ctx = events[event_indices[dist(rng)]].ctx(cfg.context_size, cfg.vocab_size);
+	const auto center_ctx = events[event_indices[dist(rng)]].materialize();
 	constexpr int radius_samples = 7;
 	double radius = 0.;
 	for (int i = 0; i < 7; ++i) {
-		radius += context_distance(events[event_indices[dist(rng)]].view(cfg.context_size, cfg.vocab_size), center_ctx);
+		radius += context_distance(events[event_indices[dist(rng)]], center_ctx);
 	}
 	radius /= radius_samples;
 
 	const auto split = std::ranges::stable_partition(event_indices, [&](const auto index) {
-		return context_distance(events[index].view(cfg.context_size, cfg.vocab_size), center_ctx) < radius;
+		return context_distance(events[index], center_ctx) < radius;
 	});
 	if (split.empty() || split.size() == event_count) {
 		return build_leaf(tree, cfg, events, event_indices);
@@ -262,7 +248,7 @@ inline uint32_t build_tree_recursively(oracle_tree& tree, const oracle_forest_co
 }
 
 
-inline oracle_tree build_tree(const oracle_forest_config& cfg, std::span<event> events, std::vector<uint32_t> indices, mx3random& rng) {
+inline oracle_tree build_tree(const oracle_forest_config& cfg, std::span<context_view> events, std::vector<uint32_t> indices, mx3random& rng) {
 	oracle_tree tree;
 	build_tree_recursively(tree, cfg, events, indices, 0, rng);
 	return tree;
@@ -288,10 +274,10 @@ inline oracle_forest build_oracle_forest(const oracle_forest_config& cfg, const 
 	oracle_forest forest{.cfg = cfg};
 	forest.trees.resize(cfg.vocab_size);
 
-	std::vector<std::vector<event>> events(cfg.vocab_size);
+	std::vector<std::vector<context_view>> events(cfg.vocab_size);
 	for (const auto& sample : samples) {
 		for (std::size_t i = 0; i + 1 < sample.size(); ++i) {
-			events[sample[i]].push_back({&sample, static_cast<uint32_t>(i)});
+			events[sample[i]].push_back({&sample, static_cast<uint32_t>(i), cfg.context_size, cfg.vocab_size});
 		}
 	}
 
@@ -327,7 +313,7 @@ inline std::vector<double> predict(const oracle_forest& forest, const std::vecto
 		return std::vector(cfg.vocab_size, 1. / cfg.vocab_size);
 	}
 
-	const auto ctx = make_context_at(tokens, index_to_predict, cfg.context_size, cfg.vocab_size);
+	const auto ctx = context_view{&tokens, index_to_predict, cfg.context_size, cfg.vocab_size}.materialize();
 	const auto& trees = forest.trees[current];
 
 	std::vector<double> probabilities(cfg.vocab_size);
