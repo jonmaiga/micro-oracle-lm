@@ -15,6 +15,40 @@ using token_id = uint32_t;
 using feature_id = uint64_t;
 using context = std::vector<feature_id>;
 
+static const uint64_t C = 0xbea225f9eb34556d;
+
+inline uint64_t mx3mix(uint64_t x) {
+	x ^= x >> 32;
+	x *= C;
+	x ^= x >> 29;
+	x *= C;
+	x ^= x >> 32;
+	x *= C;
+	x ^= x >> 29;
+	return x;
+}
+
+class mx3random {
+public:
+	using result_type = uint64_t;
+
+	explicit mx3random(uint64_t seed) : _seed(mx3mix(seed + C)), _counter(mx3mix(seed - C)) {
+	}
+
+	uint64_t operator()() {
+		_counter ^= _seed;
+		_counter += C;
+		return mx3mix(_counter);
+	}
+
+	static constexpr uint64_t min() { return 0; }
+	static constexpr uint64_t max() { return std::numeric_limits<uint64_t>::max(); }
+
+private:
+	uint64_t _seed;
+	uint64_t _counter;
+};
+
 struct config {
 	uint32_t vocab_size{};
 	uint32_t context_size{6};
@@ -100,17 +134,6 @@ inline double distance(const context& a, const context& b) {
 	return 1. - static_cast<double>(overlap) / den;
 }
 
-inline double sample_radius(std::span<const event> events, std::span<const uint32_t> source, const context& center_ctx,
-                            std::uniform_int_distribution<std::size_t>& dist, std::mt19937_64& rng,
-                            uint32_t context_size, uint32_t vocab_size) {
-	double radius = 0.;
-	constexpr int radius_samples = 7;
-	for (int i = 0; i < radius_samples; ++i) {
-		radius += distance(events[source[dist(rng)]].ctx(context_size, vocab_size), center_ctx);
-	}
-	return radius / radius_samples;
-}
-
 class leaf_model {
 public:
 	explicit leaf_model(uint32_t vocab_size) : _label_stats(vocab_size) {
@@ -128,8 +151,6 @@ public:
 		}
 	}
 
-	// Adds this leaf's per-label log-probabilities into out (caller pre-sizes and
-	// zero-initializes), so an ensemble can sum across leaves without scratch.
 	void predict_into(const context& ctx, std::vector<double>& out, double smoothing) const {
 		assert(!_label_stats.empty());
 		assert(out.size() == _label_stats.size());
@@ -176,14 +197,14 @@ private:
 
 class tree {
 public:
-	tree(const config& cfg, uint64_t seed) :
-		_cfg(cfg), _seed(seed) {
+	tree(const config& cfg) :
+		_cfg(cfg) {
 	}
 
-	void build(std::span<const event> events, std::vector<uint32_t> event_indices) {
+	void build(std::span<const event> events, std::vector<uint32_t> event_indices, mx3random& rng) {
 		_nodes.clear();
 		_leaves.clear();
-		build_node(events, event_indices, 0);
+		build_node(events, event_indices, 0, rng);
 	}
 
 	void predict_into(const context& ctx, std::vector<double>& out) const {
@@ -210,16 +231,21 @@ private:
 		return node_index;
 	}
 
-	uint32_t build_node(std::span<const event> events, std::span<uint32_t> event_indices, uint32_t depth) {
+	uint32_t build_node(std::span<const event> events, std::span<uint32_t> event_indices, uint32_t depth, mx3random& rng) {
 		const auto event_count = event_indices.size();
 		if (depth >= _cfg.max_depth || event_count < 2) {
 			return build_leaf(events, event_indices);
 		}
 
 		std::uniform_int_distribution<std::size_t> dist(0, event_count - 1);
-		std::mt19937_64 rng(_seed + depth * 16777619ull + event_count * 2166136261ull + _nodes.size());
 		const auto center_ctx = events[event_indices[dist(rng)]].ctx(_cfg.context_size, _cfg.vocab_size);
-		const auto radius = sample_radius(events, event_indices, center_ctx, dist, rng, _cfg.context_size, _cfg.vocab_size);
+		constexpr int radius_samples = 7;
+		double radius = 0.;
+		for (int i = 0; i < 7; ++i) {
+			radius += distance(events[event_indices[dist(rng)]].ctx(_cfg.context_size, _cfg.vocab_size), center_ctx);
+		}
+		radius /= radius_samples;
+
 		const auto split = std::ranges::stable_partition(event_indices, [&](const auto index) {
 			return distance(events[index].ctx(_cfg.context_size, _cfg.vocab_size), center_ctx) < radius;
 		});
@@ -230,8 +256,8 @@ private:
 		const auto mid = static_cast<std::size_t>(split.begin() - event_indices.begin());
 		const auto node_index = _nodes.size();
 		_nodes.push_back({.leaf = false, .center_context = center_ctx, .radius = radius});
-		_nodes[node_index].inner = build_node(events, event_indices.first(mid), depth + 1);
-		_nodes[node_index].outer = build_node(events, event_indices.subspan(mid), depth + 1);
+		_nodes[node_index].inner = build_node(events, event_indices.first(mid), depth + 1, rng);
+		_nodes[node_index].outer = build_node(events, event_indices.subspan(mid), depth + 1, rng);
 		return static_cast<uint32_t>(node_index);
 	}
 
@@ -249,7 +275,6 @@ private:
 	}
 
 	config _cfg;
-	uint64_t _seed{};
 	std::vector<node> _nodes;
 	std::vector<leaf_model> _leaves;
 };
@@ -269,8 +294,6 @@ public:
 			}
 		}
 
-		// One independent ensemble per current token: distinct _models[token]
-		// elements, so the outer loop parallelizes without cross-thread sharing.
 		const int token_count = static_cast<int>(_models.size());
 #pragma omp parallel for schedule(dynamic, 1)
 		for (int token = 0; token < token_count; ++token) {
@@ -278,13 +301,14 @@ public:
 			if (token_events.empty()) {
 				continue;
 			}
+			mx3random rng(token);
 			std::vector<uint32_t> indices(token_events.size());
 			std::iota(indices.begin(), indices.end(), 0u);
 			auto& trees = _models[token];
 			trees.reserve(_cfg.ensemble_size);
 			for (uint32_t t = 0; t < _cfg.ensemble_size; ++t) {
-				auto& tr = trees.emplace_back(_cfg, static_cast<uint64_t>(token) * 1009ull + t);
-				tr.build(token_events, indices);
+				auto& tr = trees.emplace_back(_cfg);
+				tr.build(token_events, indices, rng);
 			}
 		}
 	}
@@ -313,10 +337,6 @@ public:
 		softmax_normalize(probabilities, _cfg.softmax_temperature);
 
 		return probabilities;
-	}
-
-	uint32_t vocab_size() const {
-		return _cfg.vocab_size;
 	}
 
 private:
