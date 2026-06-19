@@ -163,7 +163,7 @@ inline void train(oracle_leaf& leaf, const context_view& ctx, token_id label) {
 	}
 }
 
-inline std::vector<double> predict(const oracle_leaf& leaf, const context& ctx, double smoothing) {
+inline std::vector<double> predict(const oracle_leaf& leaf, const context_view& ctx, double smoothing) {
 	std::vector<double> out(leaf.label_stats.size());
 
 	assert(!leaf.label_stats.empty());
@@ -180,8 +180,8 @@ inline std::vector<double> predict(const oracle_leaf& leaf, const context& ctx, 
 
 	// todo: replace with global vocab_size?
 	const auto vocabulary_size = static_cast<double>(leaf._feature_map.size());
-	for (const auto f : ctx) {
-		const auto it = leaf._feature_map.find(f);
+	for (std::size_t i = 0; i < ctx.size(); ++i) {
+		const auto it = leaf._feature_map.find(ctx[i]);
 		if (it == leaf._feature_map.end()) {
 			continue;
 		}
@@ -256,7 +256,7 @@ inline oracle_tree build_tree(const oracle_forest_config& cfg, const std::vector
 	return tree;
 }
 
-inline uint32_t route(const oracle_tree& tree, const context& ctx) {
+inline uint32_t route(const oracle_tree& tree, const context_view& ctx) {
 	uint32_t node_index = 0;
 	while (!tree.nodes[node_index].leaf) {
 		const auto& n = tree.nodes[node_index];
@@ -315,7 +315,7 @@ inline std::vector<double> predict(const oracle_forest& forest, const std::vecto
 		return std::vector(cfg.vocab_size, 1. / cfg.vocab_size);
 	}
 
-	const auto ctx = materialize(make_context_view(tokens, index_to_predict, cfg.context_size, cfg.vocab_size));
+	const auto ctx = make_context_view(tokens, index_to_predict, cfg.context_size, cfg.vocab_size);
 	const auto& trees = forest.trees[current];
 
 	std::vector<double> probabilities(cfg.vocab_size);
