@@ -226,7 +226,7 @@ inline uint32_t build_tree_recursively(oracle_tree& tree, const oracle_forest_co
 	}
 
 	std::uniform_int_distribution<std::size_t> dist(0, count - 1);
-	const auto center_ctx = materialize(contexts[partition[dist(rng)]]);
+	const auto center_ctx = contexts[partition[dist(rng)]];
 	constexpr int radius_samples = 7;
 	double radius = 0.;
 	for (int i = 0; i < 7; ++i) {
@@ -244,7 +244,7 @@ inline uint32_t build_tree_recursively(oracle_tree& tree, const oracle_forest_co
 	const auto mid = static_cast<std::size_t>(split.begin() - partition.begin());
 	auto& nodes = tree.nodes;
 	const auto node_index = nodes.size();
-	nodes.push_back({.center_context = center_ctx, .radius = radius});
+	nodes.push_back({.center_context = materialize(center_ctx), .radius = radius});
 	nodes[node_index].inner = build_tree_recursively(tree, cfg, contexts, partition.first(mid), depth + 1, rng);
 	nodes[node_index].outer = build_tree_recursively(tree, cfg, contexts, partition.subspan(mid), depth + 1, rng);
 	return static_cast<uint32_t>(node_index);
@@ -270,13 +270,8 @@ inline uint32_t route(const oracle_tree& tree, const context_view& ctx) {
 ////
 /// Build and predict
 ///
-///
-
 
 inline oracle_forest build_oracle_forest(const oracle_forest_config& cfg, const std::vector<std::vector<token_id>>& samples) {
-	oracle_forest forest{.cfg = cfg};
-	forest.trees.resize(cfg.vocab_size);
-
 	std::vector<std::vector<context_view>> token_contexts(cfg.vocab_size);
 	for (const auto& sample : samples) {
 		for (std::size_t i = 0; i + 1 < sample.size(); ++i) {
@@ -284,6 +279,8 @@ inline oracle_forest build_oracle_forest(const oracle_forest_config& cfg, const 
 		}
 	}
 
+	oracle_forest forest{.cfg = cfg};
+	forest.trees.resize(cfg.vocab_size);
 	const int token_count = static_cast<int>(forest.trees.size());
 #pragma omp parallel for schedule(dynamic, 1)
 	for (int token = 0; token < token_count; ++token) {
@@ -319,20 +316,20 @@ inline std::vector<double> predict(const oracle_forest& forest, const std::vecto
 	const auto ctx = make_context_view(tokens, index_to_predict, cfg.context_size, cfg.vocab_size);
 	const auto& trees = forest.trees[current];
 
-	std::vector<double> probabilities(cfg.vocab_size);
+	std::vector<double> logits(cfg.vocab_size);
 	for (const auto& tree : trees) {
 		const auto node_index = route(tree, ctx);
 		const auto& leaf = tree.leaves[tree.nodes[node_index].leaf_index];
 
-		auto tree_prediction = predict_logits(leaf, ctx, cfg.smoothing);
-		std::ranges::transform(probabilities, tree_prediction, probabilities.begin(), std::plus<double>{});
+		auto tree_logits = predict_logits(leaf, ctx, cfg.smoothing);
+		std::ranges::transform(logits, tree_logits, logits.begin(), std::plus<double>{});
 	}
 
 	const auto inv = 1. / static_cast<double>(trees.size());
-	for (auto& v : probabilities) {
+	for (auto& v : logits) {
 		v *= inv;
 	}
 
-	return softmax_normalize(probabilities, softmax_temperature);
+	return softmax_normalize(logits, softmax_temperature);
 }
 }
