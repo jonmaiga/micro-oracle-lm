@@ -18,12 +18,12 @@ using token_id = uint32_t;
 using feature_id = uint64_t;
 using context = std::vector<feature_id>;
 
-struct oracle_leaf {
-	struct target_stat {
-		uint32_t sample_count{};
-		uint32_t feature_count{};
-	};
+struct target_stat {
+	uint32_t sample_count{};
+	uint32_t feature_count{};
+};
 
+struct oracle_leaf {
 	uint32_t sample_count{};
 	std::vector<target_stat> target_stats;
 	std::unordered_map<feature_id, std::unordered_map<token_id, uint32_t>> _feature_map; // feature -> target->count
