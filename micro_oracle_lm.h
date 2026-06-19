@@ -84,20 +84,19 @@ struct context_view {
 		return make_feature((*tokens)[index - distance], distance, vocab_size);
 	}
 
-	token_id next() const {
+	token_id next_token() const {
 		return (*tokens)[index + 1];
 	}
-
-	context materialize() const {
-		context ctx;
-		const auto n = size();
-		ctx.reserve(n);
-		for (std::size_t i = 0; i < n; ++i) {
-			ctx.push_back((*this)[i]);
-		}
-		return ctx;
-	}
 };
+
+inline context materialize(const context_view& view) {
+	context ctx;
+	ctx.reserve(view.size());
+	for (std::size_t i = 0; i < view.size(); ++i) {
+		ctx.push_back(view[i]);
+	}
+	return ctx;
+}
 
 inline std::vector<double> softmax_normalize(const std::vector<double>& values, double temperature) {
 	assert(temperature > 0);
@@ -207,7 +206,7 @@ inline uint32_t build_leaf(oracle_tree& tree, const oracle_forest_config& cfg,
 	leaf.label_stats.resize(cfg.vocab_size);
 	for (const auto index : partition) {
 		const auto& context = context_views[index];
-		train(leaf, context, context.next());
+		train(leaf, context, context.next_token());
 	}
 
 	const auto node_index = tree.nodes.size();
@@ -224,7 +223,7 @@ inline uint32_t build_tree_recursively(oracle_tree& tree, const oracle_forest_co
 	}
 
 	std::uniform_int_distribution<std::size_t> dist(0, count - 1);
-	const auto center_ctx = contexts[partition[dist(rng)]].materialize();
+	const auto center_ctx = materialize(contexts[partition[dist(rng)]]);
 	constexpr int radius_samples = 7;
 	double radius = 0.;
 	for (int i = 0; i < 7; ++i) {
@@ -314,7 +313,7 @@ inline std::vector<double> predict(const oracle_forest& forest, const std::vecto
 		return std::vector(cfg.vocab_size, 1. / cfg.vocab_size);
 	}
 
-	const auto ctx = context_view{&tokens, index_to_predict, cfg.context_size, cfg.vocab_size}.materialize();
+	const auto ctx = materialize({.tokens = &tokens, .index = index_to_predict, .context_size = cfg.context_size, .vocab_size = cfg.vocab_size});
 	const auto& trees = forest.trees[current];
 
 	std::vector<double> probabilities(cfg.vocab_size);
