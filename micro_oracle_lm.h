@@ -206,8 +206,8 @@ inline uint32_t build_leaf(oracle_tree& tree, const oracle_forest_config& cfg,
 	auto& leaf = tree.leaves.emplace_back();
 	leaf.label_stats.resize(cfg.vocab_size);
 	for (const auto index : partition) {
-		const auto& e = context_views[index];
-		train(leaf, e, e.next());
+		const auto& context = context_views[index];
+		train(leaf, context, context.next());
 	}
 
 	const auto node_index = tree.nodes.size();
@@ -290,13 +290,13 @@ inline oracle_forest build_oracle_forest(const oracle_forest_config& cfg, const 
 			continue;
 		}
 		mx3random rng(token);
-		std::vector<uint32_t> indices(contexts.size());
-		std::iota(indices.begin(), indices.end(), 0u);
+		std::vector<uint32_t> partition(contexts.size());
+		std::iota(partition.begin(), partition.end(), 0u);
 		auto& trees = forest.trees[token];
 		trees.reserve(cfg.ensemble_size);
 
 		for (uint32_t t = 0; t < cfg.ensemble_size; ++t) {
-			trees.push_back(build_tree(cfg, contexts, indices, rng));
+			trees.push_back(build_tree(cfg, contexts, partition, rng));
 		}
 	}
 
