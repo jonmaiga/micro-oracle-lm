@@ -51,14 +51,15 @@ std::vector<token_id> load_dataset(const std::string& path, vocabulary& vocab) {
 
 // Samples a single name by repeatedly predicting the next token until the
 std::string generate(
-	const micro_oracle::config& config,
 	const micro_oracle::oracle_forest& forest,
 	const vocabulary& vocab,
-	std::mt19937& rng, int num_tokens) {
+	std::mt19937& rng,
+	int num_tokens,
+	double softmax_temperature) {
 	std::vector<token_id> tokens{0};
 	std::string text;
 	for (int i = 0; i < num_tokens; ++i) {
-		const auto probabilities = predict(config, forest, tokens, static_cast<uint32_t>(tokens.size() - 1));
+		const auto probabilities = predict(forest, tokens, static_cast<uint32_t>(tokens.size() - 1), softmax_temperature);
 		assert(!probabilities.empty());
 
 		std::discrete_distribution<uint32_t> dist(probabilities.begin(), probabilities.end());
@@ -98,7 +99,7 @@ std::vector<token_id> random_tokens(random& r, uint32_t length, uint32_t vocab_s
 	return tokens;
 }
 
-uint64_t no_change_hash(micro_oracle::config config) {
+uint64_t no_change_hash(micro_oracle::oracle_forest_config config) {
 	constexpr uint32_t vocab_size = 20;
 	random r(1234);
 
@@ -110,13 +111,13 @@ uint64_t no_change_hash(micro_oracle::config config) {
 
 	config.vocab_size = vocab_size;
 
-	auto forest = micro_oracle::train(config, {samples});
+	auto forest = micro_oracle::build_oracle_forest(config, {samples});
 
 	uint64_t hash = 1;
 	for (int i = 0; i < 1000; ++i) {
 		const auto tokens = random_tokens(r, r.between(0, 60), 2 * vocab_size);
 		for (uint32_t pos = 0; pos < tokens.size(); ++pos) {
-			for (const auto value : micro_oracle::predict(config, forest, tokens, pos)) {
+			for (const auto value : micro_oracle::predict(forest, tokens, pos, 1.0)) {
 				hash ^= std::hash<double>{}(value);
 			}
 		}
@@ -127,7 +128,7 @@ uint64_t no_change_hash(micro_oracle::config config) {
 void check_integrity() {
 	constexpr uint64_t expected_hash = 1205746795169421007ull;
 
-	const auto hash = no_change_hash({.context_size = 5, .ensemble_size = 4, .max_depth = 8});
+	const auto hash = no_change_hash({.context_size = 5, .max_depth = 8, .ensemble_size = 4});
 	if (hash != expected_hash) {
 		std::cout << "WARN: the new hash " << hash << " differs from expected hash " << expected_hash << ". Intentional behavior change?\n";
 	}
@@ -136,7 +137,7 @@ void check_integrity() {
 // Computes bits-per-byte (the average negative base-2 log-likelihood the model
 // assigns to each actual next token) over the held-out tokens. Each token maps
 // to one byte, so cross-entropy per token equals bits per byte.
-double compute_bpb(const micro_oracle::config& cfg, const micro_oracle::oracle_forest& forest, const std::vector<token_id>& tokens) {
+double compute_bpb(const micro_oracle::oracle_forest& forest, const std::vector<token_id>& tokens) {
 	constexpr double epsilon = 1e-12;
 	const std::int64_t count = tokens.size() > 1 ? static_cast<std::int64_t>(tokens.size()) - 1 : 0;
 
@@ -146,7 +147,7 @@ double compute_bpb(const micro_oracle::config& cfg, const micro_oracle::oracle_f
 	double total_bits = 0.;
 #pragma omp parallel for schedule(dynamic, 512) reduction(+ : total_bits)
 	for (std::int64_t i = 0; i < count; ++i) {
-		const auto probabilities = predict(cfg, forest, tokens, static_cast<uint32_t>(i));
+		const auto probabilities = predict(forest, tokens, static_cast<uint32_t>(i), 1.0);
 		const token_id actual = tokens[i + 1];
 		assert(actual < probabilities.size());
 		const double p = probabilities[actual];
@@ -157,7 +158,7 @@ double compute_bpb(const micro_oracle::config& cfg, const micro_oracle::oracle_f
 
 // Trains a fresh model on the first 80% of the sample and reports bits-per-byte
 // on the remaining 20%, leaving the existing full-corpus training untouched.
-void evaluate_held_out_bpb(const micro_oracle::config& base_cfg, const std::vector<token_id>& sample) {
+void evaluate_held_out_bpb(const micro_oracle::oracle_forest_config& base_cfg, const std::vector<token_id>& sample) {
 	if (sample.size() < 2) {
 		std::cerr << "Sample too small to evaluate held-out BPB.\n";
 		return;
@@ -170,12 +171,12 @@ void evaluate_held_out_bpb(const micro_oracle::config& base_cfg, const std::vect
 		<< " bytes, testing on " << test_tokens.size() << " bytes.\n";
 
 	auto train_start = std::chrono::steady_clock::now();
-	const auto forest = train(base_cfg, {train_tokens});
+	const auto forest = build_oracle_forest(base_cfg, {train_tokens});
 	auto train_end = std::chrono::steady_clock::now();
 	const auto train_seconds = std::chrono::duration<double>(train_end - train_start).count();
 
 	auto eval_start = std::chrono::steady_clock::now();
-	const double bpb = compute_bpb(base_cfg, forest, test_tokens);
+	const double bpb = compute_bpb(forest, test_tokens);
 	auto eval_end = std::chrono::steady_clock::now();
 	const auto eval_seconds = std::chrono::duration<double>(eval_end - eval_start).count();
 
@@ -201,9 +202,8 @@ int main(int argc, char** argv) {
 	}
 	std::cout << "Loaded '" << path << "' vocab size: " << vocab.size() << ", bytes: " << sample.size() << ".\n";
 
-	micro_oracle::config cfg;
+	micro_oracle::oracle_forest_config cfg;
 	cfg.vocab_size = vocab.size();
-	cfg.softmax_temperature = 1.;
 	cfg.max_depth = 8;
 	cfg.ensemble_size = 8;
 
@@ -212,14 +212,14 @@ int main(int argc, char** argv) {
 
 	std::cout << "Training...\n";
 	auto train_start = std::chrono::steady_clock::now();
-	auto forest = micro_oracle::train(cfg, {sample});
+	auto forest = micro_oracle::build_oracle_forest(cfg, {sample});
 	auto train_end = std::chrono::steady_clock::now();
 	const auto train_seconds = std::chrono::duration<double>(train_end - train_start).count();
 	std::cout << "Training complete (" << train_seconds << " s). Generating...\n";
 
 	std::mt19937 rng(42);
 	auto generate_start = std::chrono::steady_clock::now();
-	std::cout << generate(cfg, forest, vocab, rng, 10000) << '\n';
+	std::cout << generate(forest, vocab, rng, 10000, 1.) << '\n';
 	auto generate_end = std::chrono::steady_clock::now();
 	const auto generate_seconds = std::chrono::duration<double>(generate_end - generate_start).count();
 	std::cout << "Generation time: " << generate_seconds << " s\n";
