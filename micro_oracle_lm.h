@@ -217,26 +217,37 @@ inline std::vector<double> predict_logits(const oracle_leaf& leaf, const context
 		logits[target] = std::log((static_cast<double>(sample_count) + smoothing) / prior_den);
 	}
 
-	// todo: replace with global vocab_size?
+	// Each present context feature contributes log((count + smoothing) / den[t]) to every
+	// target t, where den[t] = feature_count[t] + smoothing * V depends only on the target.
+	// The CSR slices are sparse, so almost every count is zero: fold the zero-count case into
+	// a closed-form dense baseline applied once, then correct only the nonzero entries. In the
+	// correction the -log(den[t]) term cancels, leaving log(count + smoothing) - log(smoothing).
+	// Algebraically identical to the dense double loop, but visits only the nonzero entries.
 	const auto vocabulary_size = static_cast<double>(leaf.feature_keys.size());
+	const double log_smoothing = std::log(smoothing);
+
+	uint32_t present_features = 0;
 	for (std::size_t i = 0; i < ctx.size(); ++i) {
 		const auto key = ctx[i];
 		const auto kit = std::ranges::lower_bound(leaf.feature_keys, key);
 		if (kit == leaf.feature_keys.end() || *kit != key) {
 			continue;
 		}
+		++present_features;
 		const auto feature_index = static_cast<std::size_t>(kit - leaf.feature_keys.begin());
-		std::size_t j = leaf.feature_offsets[feature_index];
+		const std::size_t entry_begin = leaf.feature_offsets[feature_index];
 		const std::size_t entry_end = leaf.feature_offsets[feature_index + 1];
-		for (token_id target = 0; target < targets; ++target) {
+		for (std::size_t j = entry_begin; j < entry_end; ++j) {
+			logits[leaf.entry_targets[j]] += std::log(static_cast<double>(leaf.entry_counts[j]) + smoothing) - log_smoothing;
+		}
+	}
+
+	if (present_features != 0) {
+		const double scale = static_cast<double>(present_features);
+		for (std::size_t target = 0; target < targets; ++target) {
 			const auto total = leaf.target_stats[target].feature_count;
-			uint32_t count = 0;
-			if (j < entry_end && leaf.entry_targets[j] == target) {
-				count = leaf.entry_counts[j];
-				++j;
-			}
 			const double den = static_cast<double>(total) + smoothing * vocabulary_size;
-			logits[target] += std::log((static_cast<double>(count) + smoothing) / den);
+			logits[target] += scale * (log_smoothing - std::log(den));
 			assert(std::isfinite(logits[target]));
 		}
 	}
