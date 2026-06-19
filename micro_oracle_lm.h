@@ -61,8 +61,9 @@ struct oracle_forest {
 
 
 inline feature_id make_feature(token_id token, uint32_t distance, uint32_t vocab_size) {
-	assert(token < vocab_size);
-	return static_cast<feature_id>(token) + static_cast<feature_id>(distance) * vocab_size;
+	const auto feature_vocab_size = static_cast<feature_id>(vocab_size) + 1;
+	const auto feature_token = token < vocab_size ? static_cast<feature_id>(token) : static_cast<feature_id>(vocab_size);
+	return feature_token + static_cast<feature_id>(distance) * feature_vocab_size;
 }
 
 struct context_view {
@@ -277,6 +278,9 @@ inline oracle_forest build_oracle_forest(const oracle_forest_config& cfg, const 
 	std::vector<std::vector<context_view>> token_contexts(cfg.vocab_size);
 	for (const auto& sample : samples) {
 		for (std::size_t i = 0; i + 1 < sample.size(); ++i) {
+			if (sample[i] >= cfg.vocab_size || sample[i + 1] >= cfg.vocab_size) {
+				continue;
+			}
 			token_contexts[sample[i]].push_back(make_context_view(sample, static_cast<uint32_t>(i), cfg.context_size, cfg.vocab_size));
 		}
 	}

@@ -93,10 +93,10 @@ uint64_t no_change_hash(of::oracle_forest_config config) {
 	config.vocab_size = vocab_size;
 
 	auto forest = of::build_oracle_forest(config, {samples});
-
+	std::uniform_int_distribution<uint32_t> test_sample_size_dist(0, 60);
 	uint64_t hash = 1;
 	for (int i = 0; i < 1000; ++i) {
-		const auto tokens = random_tokens(r, sample_size_dist(r), vocab_size);
+		const auto tokens = random_tokens(r, test_sample_size_dist(r), vocab_size);
 		for (uint32_t pos = 0; pos < tokens.size(); ++pos) {
 			for (const auto value : of::predict(forest, tokens, pos, 1.0)) {
 				hash ^= std::hash<double>{}(value);
@@ -107,7 +107,7 @@ uint64_t no_change_hash(of::oracle_forest_config config) {
 }
 
 void check_integrity() {
-	constexpr uint64_t expected_hash = 10252349082775225901ull;
+	constexpr uint64_t expected_hash = 13080308729460298394ull;
 
 	const auto hash = no_change_hash({.context_size = 5, .max_depth = 8, .ensemble_size = 4});
 	if (hash != expected_hash) {
@@ -169,8 +169,8 @@ void evaluate_held_out_bpb(const of::oracle_forest_config& base_cfg, const std::
 int main(int argc, char** argv) {
 	using namespace std::chrono_literals;
 	//const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/tiny_stories/TinyStoriesV2.txt";
-	const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/names/names.txt";
-	//const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/2800_books/1610.txt";
+	//const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/names/names.txt";
+	const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/2800_books/1610.txt";
 	//const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/wiki_sentences/wikisent2.txt";
 
 	check_integrity();
