@@ -18,13 +18,13 @@ using feature_id = uint64_t;
 using context = std::vector<feature_id>;
 
 struct oracle_leaf {
-	struct label_stat {
+	struct prior_counts {
 		uint32_t sample_total{};
 		uint32_t feature_total{};
 	};
 
 	uint32_t sample_count{};
-	std::vector<label_stat> label_stats;
+	std::vector<prior_counts> target_prior_counts;
 	std::unordered_map<feature_id, std::unordered_map<token_id, uint32_t>> _feature_map; // feature -> next_token->count
 };
 
@@ -158,29 +158,29 @@ double context_distance(const A& a, const B& b) {
 	return 1. - static_cast<double>(overlap) / den;
 }
 
-inline void train(oracle_leaf& leaf, const context_view& ctx, token_id label) {
-	assert(label < leaf.label_stats.size());
+inline void train(oracle_leaf& leaf, const context_view& ctx, token_id target) {
+	assert(target < leaf.target_prior_counts.size());
 
 	++leaf.sample_count;
-	++leaf.label_stats[label].sample_total;
-	leaf.label_stats[label].feature_total += static_cast<uint32_t>(ctx.size());
+	++leaf.target_prior_counts[target].sample_total;
+	leaf.target_prior_counts[target].feature_total += static_cast<uint32_t>(ctx.size());
 
 	for (std::size_t i = 0; i < ctx.size(); ++i) {
-		++leaf._feature_map[ctx[i]][label];
+		++leaf._feature_map[ctx[i]][target];
 	}
 }
 
 inline std::vector<double> predict_logits(const oracle_leaf& leaf, const context_view& ctx, double smoothing) {
-	assert(!leaf.label_stats.empty());
+	assert(!leaf.target_prior_counts.empty());
 	assert(leaf.sample_count > 0);
 
-	const auto class_count = leaf.label_stats.size();
-	std::vector<double> logits(class_count);
+	const auto targets = leaf.target_prior_counts.size();
+	std::vector<double> logits(targets);
 
-	const double prior_den = static_cast<double>(leaf.sample_count) + smoothing * static_cast<double>(class_count);
-	for (std::size_t label = 0; label < class_count; ++label) {
-		const auto sample_count = leaf.label_stats[label].sample_total;
-		logits[label] = std::log((static_cast<double>(sample_count) + smoothing) / prior_den);
+	const double prior_den = static_cast<double>(leaf.sample_count) + smoothing * static_cast<double>(targets);
+	for (std::size_t target = 0; target < targets; ++target) {
+		const auto sample_count = leaf.target_prior_counts[target].sample_total;
+		logits[target] = std::log((static_cast<double>(sample_count) + smoothing) / prior_den);
 	}
 
 	// todo: replace with global vocab_size?
@@ -191,13 +191,13 @@ inline std::vector<double> predict_logits(const oracle_leaf& leaf, const context
 			continue;
 		}
 		const auto& counts = it->second;
-		for (token_id label = 0; label < class_count; ++label) {
-			const auto total = leaf.label_stats[label].feature_total;
-			const auto cit = counts.find(label);
+		for (token_id target = 0; target < targets; ++target) {
+			const auto total = leaf.target_prior_counts[target].feature_total;
+			const auto cit = counts.find(target);
 			const auto count = cit != counts.end() ? cit->second : 0;
 			const double den = static_cast<double>(total) + smoothing * vocabulary_size;
-			logits[label] += std::log((static_cast<double>(count) + smoothing) / den);
-			assert(std::isfinite(logits[label]));
+			logits[target] += std::log((static_cast<double>(count) + smoothing) / den);
+			assert(std::isfinite(logits[target]));
 		}
 	}
 
@@ -210,7 +210,7 @@ inline uint32_t build_leaf(oracle_tree& tree, const oracle_forest_config& cfg,
                            std::span<const uint32_t> partition) {
 	const auto leaf_index = static_cast<uint32_t>(tree.leaves.size());
 	auto& leaf = tree.leaves.emplace_back();
-	leaf.label_stats.resize(cfg.vocab_size);
+	leaf.target_prior_counts.resize(cfg.vocab_size);
 	for (const auto index : partition) {
 		const auto& context = context_views[index];
 		train(leaf, context, context.next_token());
