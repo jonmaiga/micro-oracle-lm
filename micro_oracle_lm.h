@@ -15,6 +15,33 @@ using token_id = uint32_t;
 using feature_id = uint64_t;
 using context = std::vector<feature_id>;
 
+struct oracle_leaf {
+	struct label_stat {
+		uint32_t sample_total{};
+		uint32_t feature_total{};
+	};
+
+	uint32_t sample_count{};
+	std::vector<label_stat> label_stats;
+	std::unordered_map<feature_id, std::unordered_map<token_id, uint32_t>> _feature_map; // feature -> next_token->count
+};
+
+struct oracle_node {
+	bool leaf{true};
+	context center_context;
+	double radius{};
+	uint32_t inner{};
+	uint32_t outer{};
+	uint32_t leaf_index{};
+};
+
+struct oracle_tree {
+	std::vector<oracle_node> nodes;
+	std::vector<oracle_leaf> leaves;
+};
+
+using oracle_forest = std::vector<std::vector<oracle_tree>>;
+
 static const uint64_t C = 0xbea225f9eb34556d;
 
 inline uint64_t mx3mix(uint64_t x) {
@@ -47,15 +74,6 @@ public:
 private:
 	uint64_t _seed;
 	uint64_t _counter;
-};
-
-struct config {
-	uint32_t vocab_size{};
-	uint32_t context_size{6};
-	uint32_t ensemble_size{8};
-	uint32_t max_depth{8};
-	double smoothing{0.5};
-	double softmax_temperature{1.};
 };
 
 inline feature_id make_feature(token_id token, uint32_t distance, uint32_t vocab_size) {
@@ -131,18 +149,6 @@ inline double distance(const context& a, const context& b) {
 	return 1. - static_cast<double>(overlap) / den;
 }
 
-struct oracle_leaf {
-	struct label_stat {
-		uint32_t sample_total{};
-		uint32_t feature_total{};
-	};
-
-	uint32_t sample_count{};
-	std::vector<label_stat> label_stats;
-	// feature -> next_token->count
-	std::unordered_map<feature_id, std::unordered_map<token_id, uint32_t>> _feature_map;
-};
-
 inline void observe(oracle_leaf& leaf, const context& ctx, token_id label) {
 	assert(label < leaf.label_stats.size());
 
@@ -187,20 +193,6 @@ inline void predict_into(const oracle_leaf& leaf, const context& ctx, std::vecto
 	}
 }
 
-
-struct oracle_node {
-	bool leaf{true};
-	context center_context;
-	double radius{};
-	uint32_t inner{};
-	uint32_t outer{};
-	uint32_t leaf_index{};
-};
-
-struct oracle_tree {
-	std::vector<oracle_node> nodes;
-	std::vector<oracle_leaf> leaves;
-};
 
 struct oracle_tree_build_config {
 	uint32_t max_depth;
@@ -258,16 +250,9 @@ inline uint32_t build_tree_recursively(oracle_tree& tree, const oracle_tree_buil
 }
 
 
-inline oracle_tree build_tree(const config& cfg, std::span<const event> events, std::vector<uint32_t> indices, mx3random& rng) {
+inline oracle_tree build_tree(const oracle_tree_build_config& cfg, std::vector<uint32_t> indices, mx3random& rng) {
 	oracle_tree tree;
-	build_tree_recursively(tree, {
-		                       .max_depth = cfg.max_depth,
-		                       .context_size = cfg.context_size,
-		                       .vocab_size = cfg.vocab_size,
-		                       .events = events,
-	                       },
-	                       indices,
-	                       0, rng);
+	build_tree_recursively(tree, cfg, indices, 0, rng);
 	return tree;
 }
 
@@ -280,15 +265,23 @@ inline uint32_t route(const oracle_tree& tree, const context& ctx) {
 	return node_index;
 }
 
-inline void predict_into(const oracle_tree& tree, const context& ctx, std::vector<double>& out, double smoothing) {
-	const auto node_index = route(tree, ctx);
-	const auto& leaf = tree.leaves[tree.nodes[node_index].leaf_index];
-	predict_into(leaf, ctx, out, smoothing);
-}
 
-using oracle_forest = std::vector<std::vector<oracle_tree>>;
+////
+/// Build and predict
+///
+///
 
-inline oracle_forest train(const config& cfg, const std::vector<std::vector<token_id>>& samples) {
+struct config {
+	uint32_t vocab_size{};
+	uint32_t context_size{6};
+	uint32_t ensemble_size{8};
+	uint32_t max_depth{8};
+	double smoothing{0.5};
+	double softmax_temperature{1.};
+};
+
+
+inline oracle_forest build_oracle_forest(const config& cfg, const std::vector<std::vector<token_id>>& samples) {
 	oracle_forest forest(cfg.vocab_size);
 
 	std::vector<std::vector<event>> events(cfg.vocab_size);
@@ -310,8 +303,16 @@ inline oracle_forest train(const config& cfg, const std::vector<std::vector<toke
 		std::iota(indices.begin(), indices.end(), 0u);
 		auto& trees = forest[token];
 		trees.reserve(cfg.ensemble_size);
+
+		oracle_tree_build_config build_cfg = {
+			.max_depth = cfg.max_depth,
+			.context_size = cfg.context_size,
+			.vocab_size = cfg.vocab_size,
+			.events = token_events
+		};
+
 		for (uint32_t t = 0; t < cfg.ensemble_size; ++t) {
-			trees.push_back(build_tree(cfg, token_events, indices, rng));
+			trees.push_back(build_tree(build_cfg, indices, rng));
 		}
 	}
 
@@ -332,8 +333,11 @@ inline std::vector<double> predict(const config& cfg, const oracle_forest& fores
 
 	std::vector<double> probabilities(cfg.vocab_size);
 	for (const auto& t : trees) {
-		predict_into(t, ctx, probabilities, cfg.smoothing);
+		const auto node_index = route(t, ctx);
+		const auto& leaf = t.leaves[t.nodes[node_index].leaf_index];
+		predict_into(leaf, ctx, probabilities, cfg.smoothing);
 	}
+
 	const auto inv = 1. / static_cast<double>(trees.size());
 	for (auto& v : probabilities) {
 		v *= inv;
