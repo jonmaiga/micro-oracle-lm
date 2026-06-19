@@ -166,19 +166,17 @@ inline void train(oracle_leaf& leaf, const context_view& ctx, token_id label) {
 	}
 }
 
-inline std::vector<double> predict(const oracle_leaf& leaf, const context_view& ctx, double smoothing) {
-	std::vector<double> out(leaf.label_stats.size());
-
+inline std::vector<double> predict_logits(const oracle_leaf& leaf, const context_view& ctx, double smoothing) {
 	assert(!leaf.label_stats.empty());
-	assert(out.size() == leaf.label_stats.size());
 	assert(leaf.sample_count > 0);
 
 	const auto class_count = leaf.label_stats.size();
+	std::vector<double> logits(class_count);
 
 	const double prior_den = static_cast<double>(leaf.sample_count) + smoothing * static_cast<double>(class_count);
 	for (std::size_t label = 0; label < class_count; ++label) {
-		const auto count = leaf.label_stats[label].sample_total;
-		out[label] = std::log((static_cast<double>(count) + smoothing) / prior_den);
+		const auto sample_count = leaf.label_stats[label].sample_total;
+		logits[label] = std::log((static_cast<double>(sample_count) + smoothing) / prior_den);
 	}
 
 	// todo: replace with global vocab_size?
@@ -194,12 +192,12 @@ inline std::vector<double> predict(const oracle_leaf& leaf, const context_view& 
 			const auto cit = counts.find(label);
 			const auto count = cit != counts.end() ? cit->second : 0;
 			const double den = static_cast<double>(total) + smoothing * vocabulary_size;
-			out[label] += std::log((static_cast<double>(count) + smoothing) / den);
-			assert(std::isfinite(out[label]));
+			logits[label] += std::log((static_cast<double>(count) + smoothing) / den);
+			assert(std::isfinite(logits[label]));
 		}
 	}
 
-	return out;
+	return logits;
 }
 
 
@@ -326,7 +324,7 @@ inline std::vector<double> predict(const oracle_forest& forest, const std::vecto
 		const auto node_index = route(tree, ctx);
 		const auto& leaf = tree.leaves[tree.nodes[node_index].leaf_index];
 
-		auto tree_prediction = predict(leaf, ctx, cfg.smoothing);
+		auto tree_prediction = predict_logits(leaf, ctx, cfg.smoothing);
 		std::ranges::transform(probabilities, tree_prediction, probabilities.begin(), std::plus<double>{});
 	}
 
