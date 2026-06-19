@@ -60,6 +60,7 @@ struct oracle_forest {
 
 
 inline feature_id make_feature(token_id token, uint32_t distance, uint32_t vocab_size) {
+	assert(token < vocab_size);
 	return static_cast<feature_id>(token) + static_cast<feature_id>(distance) * vocab_size;
 }
 
