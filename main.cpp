@@ -39,11 +39,11 @@ private:
 	std::vector<char> _token_to_char;
 };
 
-std::vector<token_id> load_dataset(const std::string& path, vocabulary& vocab) {
+std::vector<token_id> load_dataset(const std::string& path, vocabulary& vocab, std::size_t max_size = std::numeric_limits<std::size_t>::max()) {
 	std::ifstream file(path, std::ios::binary);
 	assert(file);
 	std::vector<token_id> sample;
-	for (char c; file.get(c);) {
+	for (char c; file.get(c) && sample.size() < max_size;) {
 		sample.push_back(vocab.encode(static_cast<unsigned char>(c)));
 	}
 	return sample;
@@ -53,7 +53,7 @@ std::vector<token_id> load_dataset(const std::string& path, vocabulary& vocab) {
 std::string generate(
 	const of::oracle_forest& forest,
 	const vocabulary& vocab,
-	std::mt19937& rng,
+	mx3random& rng,
 	int num_tokens,
 	double softmax_temperature) {
 	std::vector<token_id> tokens{0};
@@ -115,69 +115,22 @@ void check_integrity() {
 		std::cout << "WARN: the new hash " << hash << " differs from expected hash " << expected_hash << ". Intentional behavior change?\n";
 	}
 }
-
-// Computes bits-per-byte (the average negative base-2 log-likelihood the model
-// assigns to each actual next token) over the held-out tokens. Each token maps
-// to one byte, so cross-entropy per token equals bits per byte.
-double compute_bpb(const of::oracle_forest& forest, const std::vector<token_id>& tokens) {
-	constexpr double epsilon = 1e-12;
-	const std::int64_t count = tokens.size() > 1 ? static_cast<std::int64_t>(tokens.size()) - 1 : 0;
-
-	// predict() is a read-only, allocation-local operation, so positions can be
-	// scored independently and summed via a reduction (matches the OpenMP
-	// parallelism already used during training).
-	double total_bits = 0.;
-#pragma omp parallel for schedule(dynamic, 512) reduction(+ : total_bits)
-	for (std::int64_t i = 0; i < count; ++i) {
-		const auto probabilities = predict(forest, tokens, static_cast<uint32_t>(i), 1.0);
-		const token_id actual = tokens[i + 1];
-		assert(actual < probabilities.size());
-		const double p = probabilities[actual];
-		total_bits += -std::log2(std::max(p, epsilon));
-	}
-	return count == 0 ? 0. : total_bits / static_cast<double>(count);
-}
-
-// Trains a fresh model on the first 80% of the sample and reports bits-per-byte
-// on the remaining 20%, leaving the existing full-corpus training untouched.
-void evaluate_held_out_bpb(const of::oracle_forest_config& base_cfg, const std::vector<token_id>& sample) {
-	if (sample.size() < 2) {
-		std::cerr << "Sample too small to evaluate held-out BPB.\n";
-		return;
-	}
-
-	const std::size_t split = sample.size() * 4 / 5;
-	const std::vector<token_id> train_tokens(sample.begin(), sample.begin() + split);
-	const std::vector<token_id> test_tokens(sample.begin() + split, sample.end());
-	std::cout << "Held-out evaluation: training on " << train_tokens.size()
-		<< " bytes, testing on " << test_tokens.size() << " bytes.\n";
-
-	auto train_start = std::chrono::steady_clock::now();
-	const auto forest = build_oracle_forest(base_cfg, {train_tokens});
-	auto train_end = std::chrono::steady_clock::now();
-	const auto train_seconds = std::chrono::duration<double>(train_end - train_start).count();
-
-	auto eval_start = std::chrono::steady_clock::now();
-	const double bpb = compute_bpb(forest, test_tokens);
-	auto eval_end = std::chrono::steady_clock::now();
-	const auto eval_seconds = std::chrono::duration<double>(eval_end - eval_start).count();
-
-	std::cout << "Held-out BPB: " << bpb << " bits/byte (train " << train_seconds
-		<< " s, eval " << eval_seconds << " s).\n";
-}
 } // namespace
 
 int main(int argc, char** argv) {
 	using namespace std::chrono_literals;
-	//const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/tiny_stories/TinyStoriesV2.txt";
+
+	constexpr std::size_t max_size = 500000000;
+
+	const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/tiny_stories/TinyStoriesV2.txt";
 	//const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/names/names.txt";
-	const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/2800_books/1610.txt";
+	//const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/2800_books/1610.txt";
 	//const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/wiki_sentences/wikisent2.txt";
 
 	check_integrity();
 
 	vocabulary vocab;
-	const auto sample = load_dataset(path, vocab);
+	auto sample = load_dataset(path, vocab, max_size);
 	if (sample.empty()) {
 		std::cerr << "Failed to read any names from " << path << '\n';
 		return 1;
@@ -186,8 +139,8 @@ int main(int argc, char** argv) {
 
 	of::oracle_forest_config cfg;
 	cfg.vocab_size = vocab.size();
-	cfg.max_depth = 8;
-	cfg.ensemble_size = 8;
+	cfg.max_depth = 4;
+	cfg.ensemble_size = 4;
 
 	evaluate_held_out_bpb(cfg, sample);
 
@@ -198,10 +151,13 @@ int main(int argc, char** argv) {
 	auto train_end = std::chrono::steady_clock::now();
 	const auto train_seconds = std::chrono::duration<double>(train_end - train_start).count();
 	std::cout << "Training complete (" << train_seconds << " s).\n";
-	of::print_size_bytes(std::cout, forest);
-	std::cout << "Generating...\n";
+	const auto size_stats = size_bytes(forest);
+	of::print_size_bytes(std::cout, size_stats);
+	std::cout << "Model size ratio: " << static_cast<double>(size_stats.serialized) / sample.size() << "\n\n";
 
-	std::mt19937 rng(42);
+
+	std::cout << "Generating...\n";
+	mx3random rng(42);
 	auto generate_start = std::chrono::steady_clock::now();
 	std::cout << generate(forest, vocab, rng, 1000, 1.) << '\n';
 	auto generate_end = std::chrono::steady_clock::now();
