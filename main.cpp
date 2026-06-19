@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "micro_oracle_lm.h"
+#include "utils.h"
 
 namespace {
 using of::token_id;
@@ -196,11 +197,13 @@ int main(int argc, char** argv) {
 	auto forest = of::build_oracle_forest(cfg, {sample});
 	auto train_end = std::chrono::steady_clock::now();
 	const auto train_seconds = std::chrono::duration<double>(train_end - train_start).count();
-	std::cout << "Training complete (" << train_seconds << " s). Generating...\n";
+	std::cout << "Training complete (" << train_seconds << " s).\n";
+	of::print_size_bytes(std::cout, forest);
+	std::cout << "Generating...\n";
 
 	std::mt19937 rng(42);
 	auto generate_start = std::chrono::steady_clock::now();
-	std::cout << generate(forest, vocab, rng, 10000, 1.) << '\n';
+	std::cout << generate(forest, vocab, rng, 1000, 1.) << '\n';
 	auto generate_end = std::chrono::steady_clock::now();
 	const auto generate_seconds = std::chrono::duration<double>(generate_end - generate_start).count();
 	std::cout << "Generation time: " << generate_seconds << " s\n";
