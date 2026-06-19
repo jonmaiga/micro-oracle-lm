@@ -151,8 +151,7 @@ double context_distance(const A& a, const B& b) {
 	return 1. - static_cast<double>(overlap) / den;
 }
 
-template <class Range>
-void train(oracle_leaf& leaf, const Range& ctx, token_id label) {
+inline void train(oracle_leaf& leaf, const context_view& ctx, token_id label) {
 	assert(label < leaf.label_stats.size());
 
 	++leaf.sample_count;
