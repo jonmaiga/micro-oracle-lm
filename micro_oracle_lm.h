@@ -117,22 +117,25 @@ struct event {
 	}
 };
 
-inline void softmax_normalize(std::vector<double>& values, double temperature) {
+inline std::vector<double> softmax_normalize(const std::vector<double>& values, double temperature) {
 	assert(temperature > 0);
 	assert(std::isfinite(temperature));
 
+	std::vector<double> result(values.size());
 	const auto max_log = *std::ranges::max_element(values);
 	double sum = 0.;
-	for (auto& v : values) {
-		v = std::exp((v - max_log) / temperature);
+	for (std::size_t i = 0; i < values.size(); ++i) {
+		const auto v = std::exp((values[i] - max_log) / temperature);
+		result[i] = v;
 		sum += v;
 	}
 	assert(sum > 0.0);
 	assert(std::isfinite(sum));
 
-	for (auto& v : values) {
+	for (auto& v : result) {
 		v /= sum;
 	}
+	return result;
 }
 
 // Cosine distance over the (binary) feature sets. Both feature lists are sorted
@@ -335,8 +338,6 @@ inline std::vector<double> predict(const oracle_forest& forest, const std::vecto
 		v *= inv;
 	}
 
-	softmax_normalize(probabilities, softmax_temperature);
-
-	return probabilities;
+	return softmax_normalize(probabilities, softmax_temperature);
 }
 }
