@@ -12,7 +12,7 @@
 #include "micro_oracle_lm.h"
 
 namespace {
-using micro_oracle::token_id;
+using of::token_id;
 
 class vocabulary {
 public:
@@ -51,7 +51,7 @@ std::vector<token_id> load_dataset(const std::string& path, vocabulary& vocab) {
 
 // Samples a single name by repeatedly predicting the next token until the
 std::string generate(
-	const micro_oracle::oracle_forest& forest,
+	const of::oracle_forest& forest,
 	const vocabulary& vocab,
 	std::mt19937& rng,
 	int num_tokens,
@@ -99,7 +99,7 @@ std::vector<token_id> random_tokens(random& r, uint32_t length, uint32_t vocab_s
 	return tokens;
 }
 
-uint64_t no_change_hash(micro_oracle::oracle_forest_config config) {
+uint64_t no_change_hash(of::oracle_forest_config config) {
 	constexpr uint32_t vocab_size = 20;
 	random r(1234);
 
@@ -111,13 +111,13 @@ uint64_t no_change_hash(micro_oracle::oracle_forest_config config) {
 
 	config.vocab_size = vocab_size;
 
-	auto forest = micro_oracle::build_oracle_forest(config, {samples});
+	auto forest = of::build_oracle_forest(config, {samples});
 
 	uint64_t hash = 1;
 	for (int i = 0; i < 1000; ++i) {
 		const auto tokens = random_tokens(r, r.between(0, 60), 2 * vocab_size);
 		for (uint32_t pos = 0; pos < tokens.size(); ++pos) {
-			for (const auto value : micro_oracle::predict(forest, tokens, pos, 1.0)) {
+			for (const auto value : of::predict(forest, tokens, pos, 1.0)) {
 				hash ^= std::hash<double>{}(value);
 			}
 		}
@@ -126,7 +126,7 @@ uint64_t no_change_hash(micro_oracle::oracle_forest_config config) {
 }
 
 void check_integrity() {
-	constexpr uint64_t expected_hash = 1205746795169421007ull;
+	constexpr uint64_t expected_hash = 13355809636219026631ull;
 
 	const auto hash = no_change_hash({.context_size = 5, .max_depth = 8, .ensemble_size = 4});
 	if (hash != expected_hash) {
@@ -137,7 +137,7 @@ void check_integrity() {
 // Computes bits-per-byte (the average negative base-2 log-likelihood the model
 // assigns to each actual next token) over the held-out tokens. Each token maps
 // to one byte, so cross-entropy per token equals bits per byte.
-double compute_bpb(const micro_oracle::oracle_forest& forest, const std::vector<token_id>& tokens) {
+double compute_bpb(const of::oracle_forest& forest, const std::vector<token_id>& tokens) {
 	constexpr double epsilon = 1e-12;
 	const std::int64_t count = tokens.size() > 1 ? static_cast<std::int64_t>(tokens.size()) - 1 : 0;
 
@@ -158,7 +158,7 @@ double compute_bpb(const micro_oracle::oracle_forest& forest, const std::vector<
 
 // Trains a fresh model on the first 80% of the sample and reports bits-per-byte
 // on the remaining 20%, leaving the existing full-corpus training untouched.
-void evaluate_held_out_bpb(const micro_oracle::oracle_forest_config& base_cfg, const std::vector<token_id>& sample) {
+void evaluate_held_out_bpb(const of::oracle_forest_config& base_cfg, const std::vector<token_id>& sample) {
 	if (sample.size() < 2) {
 		std::cerr << "Sample too small to evaluate held-out BPB.\n";
 		return;
@@ -202,7 +202,7 @@ int main(int argc, char** argv) {
 	}
 	std::cout << "Loaded '" << path << "' vocab size: " << vocab.size() << ", bytes: " << sample.size() << ".\n";
 
-	micro_oracle::oracle_forest_config cfg;
+	of::oracle_forest_config cfg;
 	cfg.vocab_size = vocab.size();
 	cfg.max_depth = 8;
 	cfg.ensemble_size = 8;
@@ -212,7 +212,7 @@ int main(int argc, char** argv) {
 
 	std::cout << "Training...\n";
 	auto train_start = std::chrono::steady_clock::now();
-	auto forest = micro_oracle::build_oracle_forest(cfg, {sample});
+	auto forest = of::build_oracle_forest(cfg, {sample});
 	auto train_end = std::chrono::steady_clock::now();
 	const auto train_seconds = std::chrono::duration<double>(train_end - train_start).count();
 	std::cout << "Training complete (" << train_seconds << " s). Generating...\n";

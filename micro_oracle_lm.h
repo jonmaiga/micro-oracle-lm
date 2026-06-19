@@ -10,7 +10,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace micro_oracle {
+namespace of {
 using token_id = uint32_t;
 using feature_id = uint64_t;
 using context = std::vector<feature_id>;
@@ -164,7 +164,7 @@ inline double distance(const context& a, const context& b) {
 	return 1. - static_cast<double>(overlap) / den;
 }
 
-inline void observe(oracle_leaf& leaf, const context& ctx, token_id label) {
+inline void train(oracle_leaf& leaf, const context& ctx, token_id label) {
 	assert(label < leaf.label_stats.size());
 
 	++leaf.sample_count;
@@ -176,7 +176,9 @@ inline void observe(oracle_leaf& leaf, const context& ctx, token_id label) {
 	}
 }
 
-inline void predict_into(const oracle_leaf& leaf, const context& ctx, std::vector<double>& out, double smoothing) {
+inline std::vector<double> predict(const oracle_leaf& leaf, const context& ctx, double smoothing) {
+	std::vector<double> out(leaf.label_stats.size());
+
 	assert(!leaf.label_stats.empty());
 	assert(out.size() == leaf.label_stats.size());
 	assert(leaf.sample_count > 0);
@@ -186,7 +188,7 @@ inline void predict_into(const oracle_leaf& leaf, const context& ctx, std::vecto
 	const double prior_den = static_cast<double>(leaf.sample_count) + smoothing * static_cast<double>(class_count);
 	for (std::size_t label = 0; label < class_count; ++label) {
 		const auto count = leaf.label_stats[label].sample_total;
-		out[label] += std::log((static_cast<double>(count) + smoothing) / prior_den);
+		out[label] = std::log((static_cast<double>(count) + smoothing) / prior_den);
 	}
 
 	// todo: replace with global vocab_size?
@@ -206,6 +208,8 @@ inline void predict_into(const oracle_leaf& leaf, const context& ctx, std::vecto
 			assert(std::isfinite(out[label]));
 		}
 	}
+
+	return out;
 }
 
 
@@ -217,7 +221,7 @@ inline uint32_t build_leaf(oracle_tree& tree, const oracle_forest_config& cfg,
 	leaf.label_stats.resize(cfg.vocab_size);
 	for (const auto index : source) {
 		const auto& e = events[index];
-		observe(leaf, e.ctx(cfg.context_size, cfg.vocab_size), e.next());
+		train(leaf, e.ctx(cfg.context_size, cfg.vocab_size), e.next());
 	}
 
 	const auto node_index = tree.nodes.size();
@@ -327,10 +331,12 @@ inline std::vector<double> predict(const oracle_forest& forest, const std::vecto
 	const auto& trees = forest.trees[current];
 
 	std::vector<double> probabilities(cfg.vocab_size);
-	for (const auto& t : trees) {
-		const auto node_index = route(t, ctx);
-		const auto& leaf = t.leaves[t.nodes[node_index].leaf_index];
-		predict_into(leaf, ctx, probabilities, cfg.smoothing);
+	for (const auto& tree : trees) {
+		const auto node_index = route(tree, ctx);
+		const auto& leaf = tree.leaves[tree.nodes[node_index].leaf_index];
+
+		auto tree_prediction = predict(leaf, ctx, cfg.smoothing);
+		std::ranges::transform(probabilities, tree_prediction, probabilities.begin(), std::plus<double>{});
 	}
 
 	const auto inv = 1. / static_cast<double>(trees.size());
