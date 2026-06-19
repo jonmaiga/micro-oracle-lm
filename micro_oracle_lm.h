@@ -9,6 +9,7 @@
 #include <random>
 #include <span>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "random.h"
@@ -26,7 +27,15 @@ struct target_stat {
 struct oracle_leaf {
 	uint32_t sample_count{};
 	std::vector<target_stat> target_stats;
-	std::unordered_map<feature_id, std::unordered_map<token_id, uint32_t>> _feature_map; // feature -> target->count
+
+	// Flat (CSR) feature store, built once per leaf and then read-only.
+	// feature_keys is sorted and unique; feature_offsets has size
+	// feature_keys.size() + 1 and slices the parallel entry_targets / entry_counts
+	// arrays. Each feature's slice is sorted ascending by target.
+	std::vector<feature_id> feature_keys;
+	std::vector<uint32_t> feature_offsets;
+	std::vector<token_id> entry_targets;
+	std::vector<uint32_t> entry_counts;
 };
 
 struct oracle_node {
@@ -157,7 +166,9 @@ double context_distance(const A& a, const B& b) {
 	return 1. - static_cast<double>(overlap) / den;
 }
 
-inline void train(oracle_leaf& leaf, const context_view& ctx, token_id target) {
+using feature_accumulator = std::unordered_map<feature_id, std::unordered_map<token_id, uint32_t>>;
+
+inline void train(oracle_leaf& leaf, feature_accumulator& features, const context_view& ctx, token_id target) {
 	assert(target < leaf.target_stats.size());
 
 	++leaf.sample_count;
@@ -165,7 +176,31 @@ inline void train(oracle_leaf& leaf, const context_view& ctx, token_id target) {
 	leaf.target_stats[target].feature_count += static_cast<uint32_t>(ctx.size());
 
 	for (std::size_t i = 0; i < ctx.size(); ++i) {
-		++leaf._feature_map[ctx[i]][target];
+		++features[ctx[i]][target];
+	}
+}
+
+// Compacts the temporary feature accumulator into the leaf's flat CSR arrays.
+inline void finalize_leaf(oracle_leaf& leaf, const feature_accumulator& features) {
+	leaf.feature_keys.reserve(features.size());
+	for (const auto& [feature, _] : features) {
+		leaf.feature_keys.push_back(feature);
+	}
+	std::ranges::sort(leaf.feature_keys);
+
+	leaf.feature_offsets.reserve(leaf.feature_keys.size() + 1);
+	leaf.feature_offsets.push_back(0);
+
+	std::vector<std::pair<token_id, uint32_t>> ordered;
+	for (const auto feature : leaf.feature_keys) {
+		const auto& counts = features.at(feature);
+		ordered.assign(counts.begin(), counts.end());
+		std::ranges::sort(ordered, {}, &std::pair<token_id, uint32_t>::first);
+		for (const auto& [target, count] : ordered) {
+			leaf.entry_targets.push_back(target);
+			leaf.entry_counts.push_back(count);
+		}
+		leaf.feature_offsets.push_back(static_cast<uint32_t>(leaf.entry_targets.size()));
 	}
 }
 
@@ -183,17 +218,23 @@ inline std::vector<double> predict_logits(const oracle_leaf& leaf, const context
 	}
 
 	// todo: replace with global vocab_size?
-	const auto vocabulary_size = static_cast<double>(leaf._feature_map.size());
+	const auto vocabulary_size = static_cast<double>(leaf.feature_keys.size());
 	for (std::size_t i = 0; i < ctx.size(); ++i) {
-		const auto it = leaf._feature_map.find(ctx[i]);
-		if (it == leaf._feature_map.end()) {
+		const auto key = ctx[i];
+		const auto kit = std::ranges::lower_bound(leaf.feature_keys, key);
+		if (kit == leaf.feature_keys.end() || *kit != key) {
 			continue;
 		}
-		const auto& counts = it->second;
+		const auto feature_index = static_cast<std::size_t>(kit - leaf.feature_keys.begin());
+		std::size_t j = leaf.feature_offsets[feature_index];
+		const std::size_t entry_end = leaf.feature_offsets[feature_index + 1];
 		for (token_id target = 0; target < targets; ++target) {
 			const auto total = leaf.target_stats[target].feature_count;
-			const auto cit = counts.find(target);
-			const auto count = cit != counts.end() ? cit->second : 0;
+			uint32_t count = 0;
+			if (j < entry_end && leaf.entry_targets[j] == target) {
+				count = leaf.entry_counts[j];
+				++j;
+			}
 			const double den = static_cast<double>(total) + smoothing * vocabulary_size;
 			logits[target] += std::log((static_cast<double>(count) + smoothing) / den);
 			assert(std::isfinite(logits[target]));
@@ -210,10 +251,12 @@ inline uint32_t build_leaf(oracle_tree& tree, const oracle_forest_config& cfg,
 	const auto leaf_index = static_cast<uint32_t>(tree.leaves.size());
 	auto& leaf = tree.leaves.emplace_back();
 	leaf.target_stats.resize(cfg.vocab_size);
+	feature_accumulator features;
 	for (const auto index : partition) {
 		const auto& context = context_views[index];
-		train(leaf, context, context.next_token());
+		train(leaf, features, context, context.next_token());
 	}
+	finalize_leaf(leaf, features);
 
 	const auto node_index = tree.nodes.size();
 	tree.nodes.push_back({.leaf_index = leaf_index});

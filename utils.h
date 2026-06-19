@@ -72,24 +72,16 @@ struct model_size_bytes {
 	std::size_t center_contexts{};
 	std::size_t leaves{};
 	std::size_t target_stats{};
-	std::size_t feature_map_buckets{};
-	std::size_t feature_map_entries{};
-	std::size_t target_count_buckets{};
-	std::size_t target_count_entries{};
+	std::size_t feature_keys{};
+	std::size_t feature_offsets{};
+	std::size_t entries{};
 	std::size_t serialized{};
 
 	std::size_t total() const {
 		return forest + token_tree_vectors + trees + nodes + center_contexts + leaves + target_stats
-			+ feature_map_buckets + feature_map_entries + target_count_buckets + target_count_entries;
+			+ feature_keys + feature_offsets + entries;
 	}
 };
-
-template <class K, class V>
-void add_unordered_map_storage_bytes(const std::unordered_map<K, V>& map,
-                                     std::size_t& buckets, std::size_t& entries) {
-	buckets += map.bucket_count() * sizeof(void*);
-	entries += map.size() * sizeof(typename std::unordered_map<K, V>::value_type);
-}
 
 inline model_size_bytes size_bytes(const oracle_forest& forest) {
 	model_size_bytes size;
@@ -114,17 +106,16 @@ inline model_size_bytes size_bytes(const oracle_forest& forest) {
 
 			for (const auto& leaf : tree.leaves) {
 				size.target_stats += leaf.target_stats.size() * sizeof(target_stat);
+				size.feature_keys += leaf.feature_keys.size() * sizeof(feature_id);
+				size.feature_offsets += leaf.feature_offsets.size() * sizeof(uint32_t);
+				size.entries += leaf.entry_targets.size() * sizeof(token_id);
+				size.entries += leaf.entry_counts.size() * sizeof(uint32_t);
 				size.serialized += sizeof(uint32_t); // sample_count
 				size.serialized += sizeof(uint32_t); // target stat count
 				size.serialized += leaf.target_stats.size() * sizeof(target_stat);
-				add_unordered_map_storage_bytes(leaf._feature_map, size.feature_map_buckets, size.feature_map_entries);
-				size.serialized += sizeof(uint32_t); // feature map entry count
-				for (const auto& [_, target_counts] : leaf._feature_map) {
-					add_unordered_map_storage_bytes(target_counts, size.target_count_buckets, size.target_count_entries);
-					size.serialized += sizeof(feature_id); // feature key
-					size.serialized += sizeof(uint32_t); // target-count entry count
-					size.serialized += target_counts.size() * (sizeof(token_id) + sizeof(uint32_t));
-				}
+				size.serialized += sizeof(uint32_t); // feature key count
+				size.serialized += leaf.feature_keys.size() * sizeof(feature_id);
+				size.serialized += leaf.entry_targets.size() * (sizeof(token_id) + sizeof(uint32_t));
 			}
 		}
 	}
@@ -160,10 +151,9 @@ inline void print_size_bytes(std::ostream& out, const model_size_bytes& size) {
 	print("center_contexts", size.center_contexts);
 	print("leaves", size.leaves);
 	print("target_stats", size.target_stats);
-	print("feature_map_buckets", size.feature_map_buckets);
-	print("feature_map_entries", size.feature_map_entries);
-	print("target_count_buckets", size.target_count_buckets);
-	print("target_count_entries", size.target_count_entries);
+	print("feature_keys", size.feature_keys);
+	print("feature_offsets", size.feature_offsets);
+	print("entries", size.entries);
 	print("serialized", size.serialized);
 }
 
