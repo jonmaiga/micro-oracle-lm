@@ -200,8 +200,8 @@ inline std::vector<double> predict(const oracle_leaf& leaf, const context& ctx, 
 
 
 inline uint32_t build_leaf(oracle_tree& tree, const oracle_forest_config& cfg,
-						   std::span<const context_view> events,
-						   std::span<const uint32_t> source) {
+                           std::span<const context_view> events,
+                           std::span<const uint32_t> source) {
 	const auto leaf_index = static_cast<uint32_t>(tree.leaves.size());
 	auto& leaf = tree.leaves.emplace_back();
 	leaf.label_stats.resize(cfg.vocab_size);
@@ -216,41 +216,41 @@ inline uint32_t build_leaf(oracle_tree& tree, const oracle_forest_config& cfg,
 }
 
 inline uint32_t build_tree_recursively(oracle_tree& tree, const oracle_forest_config& cfg,
-									   std::span<const context_view> events, std::span<uint32_t> event_indices, uint32_t depth, mx3random& rng) {
+                                       const std::vector<context_view>& contexts, std::span<uint32_t> event_indices, uint32_t depth, mx3random& rng) {
 	const auto event_count = event_indices.size();
 	if (depth >= cfg.max_depth || event_count < 2) {
-		return build_leaf(tree, cfg, events, event_indices);
+		return build_leaf(tree, cfg, contexts, event_indices);
 	}
 
 	std::uniform_int_distribution<std::size_t> dist(0, event_count - 1);
-	const auto center_ctx = events[event_indices[dist(rng)]].materialize();
+	const auto center_ctx = contexts[event_indices[dist(rng)]].materialize();
 	constexpr int radius_samples = 7;
 	double radius = 0.;
 	for (int i = 0; i < 7; ++i) {
-		radius += context_distance(events[event_indices[dist(rng)]], center_ctx);
+		radius += context_distance(contexts[event_indices[dist(rng)]], center_ctx);
 	}
 	radius /= radius_samples;
 
 	const auto split = std::ranges::stable_partition(event_indices, [&](const auto index) {
-		return context_distance(events[index], center_ctx) < radius;
+		return context_distance(contexts[index], center_ctx) < radius;
 	});
 	if (split.empty() || split.size() == event_count) {
-		return build_leaf(tree, cfg, events, event_indices);
+		return build_leaf(tree, cfg, contexts, event_indices);
 	}
 
 	const auto mid = static_cast<std::size_t>(split.begin() - event_indices.begin());
 	auto& nodes = tree.nodes;
 	const auto node_index = nodes.size();
 	nodes.push_back({.leaf = false, .center_context = center_ctx, .radius = radius});
-	nodes[node_index].inner = build_tree_recursively(tree, cfg, events, event_indices.first(mid), depth + 1, rng);
-	nodes[node_index].outer = build_tree_recursively(tree, cfg, events, event_indices.subspan(mid), depth + 1, rng);
+	nodes[node_index].inner = build_tree_recursively(tree, cfg, contexts, event_indices.first(mid), depth + 1, rng);
+	nodes[node_index].outer = build_tree_recursively(tree, cfg, contexts, event_indices.subspan(mid), depth + 1, rng);
 	return static_cast<uint32_t>(node_index);
 }
 
 
-inline oracle_tree build_tree(const oracle_forest_config& cfg, std::span<context_view> events, std::vector<uint32_t> indices, mx3random& rng) {
+inline oracle_tree build_tree(const oracle_forest_config& cfg, const std::vector<context_view>& contexts, std::vector<uint32_t> indices, mx3random& rng) {
 	oracle_tree tree;
-	build_tree_recursively(tree, cfg, events, indices, 0, rng);
+	build_tree_recursively(tree, cfg, contexts, indices, 0, rng);
 	return tree;
 }
 
@@ -284,18 +284,18 @@ inline oracle_forest build_oracle_forest(const oracle_forest_config& cfg, const 
 	const int token_count = static_cast<int>(forest.trees.size());
 #pragma omp parallel for schedule(dynamic, 1)
 	for (int token = 0; token < token_count; ++token) {
-		auto& token_events = events[token];
-		if (token_events.empty()) {
+		const auto& contexts = events[token];
+		if (contexts.empty()) {
 			continue;
 		}
 		mx3random rng(token);
-		std::vector<uint32_t> indices(token_events.size());
+		std::vector<uint32_t> indices(contexts.size());
 		std::iota(indices.begin(), indices.end(), 0u);
 		auto& trees = forest.trees[token];
 		trees.reserve(cfg.ensemble_size);
 
 		for (uint32_t t = 0; t < cfg.ensemble_size; ++t) {
-			trees.push_back(build_tree(cfg, token_events, indices, rng));
+			trees.push_back(build_tree(cfg, contexts, indices, rng));
 		}
 	}
 
