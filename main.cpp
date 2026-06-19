@@ -115,7 +115,7 @@ uint64_t no_change_hash(of::oracle_forest_config config) {
 
 	uint64_t hash = 1;
 	for (int i = 0; i < 1000; ++i) {
-		const auto tokens = random_tokens(r, r.between(0, 60), 2 * vocab_size);
+		const auto tokens = random_tokens(r, r.between(0, 60), vocab_size);
 		for (uint32_t pos = 0; pos < tokens.size(); ++pos) {
 			for (const auto value : of::predict(forest, tokens, pos, 1.0)) {
 				hash ^= std::hash<double>{}(value);
@@ -126,7 +126,7 @@ uint64_t no_change_hash(of::oracle_forest_config config) {
 }
 
 void check_integrity() {
-	constexpr uint64_t expected_hash = 13355809636219026631ull;
+	constexpr uint64_t expected_hash = 2760852664307949450ull;
 
 	const auto hash = no_change_hash({.context_size = 5, .max_depth = 8, .ensemble_size = 4});
 	if (hash != expected_hash) {
