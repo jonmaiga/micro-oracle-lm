@@ -97,7 +97,7 @@ uint64_t no_change_hash(of::oracle_forest_config config) {
 	std::uniform_int_distribution<uint32_t> test_sample_size_dist(0, 60);
 	uint64_t hash = 1;
 	for (int i = 0; i < 1000; ++i) {
-		const auto tokens = random_tokens(r, test_sample_size_dist(r), vocab_size);
+		const auto tokens = random_tokens(r, test_sample_size_dist(r), vocab_size + 10);
 		for (uint32_t pos = 0; pos < tokens.size(); ++pos) {
 			for (const auto value : of::predict(forest, tokens, pos, 1.0)) {
 				hash ^= std::hash<double>{}(value);
@@ -108,7 +108,7 @@ uint64_t no_change_hash(of::oracle_forest_config config) {
 }
 
 void check_integrity() {
-	constexpr uint64_t expected_hash = 13080308729460298394ull;
+	constexpr uint64_t expected_hash = 155657146846925995ull;
 
 	const auto hash = no_change_hash({.context_size = 5, .max_depth = 8, .ensemble_size = 4});
 	if (hash != expected_hash) {
@@ -120,7 +120,7 @@ void check_integrity() {
 int main(int argc, char** argv) {
 	using namespace std::chrono_literals;
 
-	constexpr std::size_t max_size = 500000000;
+	constexpr std::size_t max_size = 50000000;
 
 	const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/tiny_stories/TinyStoriesV2.txt";
 	//const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/names/names.txt";
@@ -139,8 +139,8 @@ int main(int argc, char** argv) {
 
 	of::oracle_forest_config cfg;
 	cfg.vocab_size = vocab.size();
-	cfg.max_depth = 4;
-	cfg.ensemble_size = 4;
+	cfg.max_depth = 8;
+	cfg.ensemble_size = 8;
 
 	evaluate_held_out_bpb(cfg, sample);
 

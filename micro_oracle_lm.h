@@ -18,6 +18,7 @@ namespace of {
 using token_id = uint32_t;
 using feature_id = uint64_t;
 using context = std::vector<feature_id>;
+using feature_map = std::unordered_map<feature_id, std::unordered_map<token_id, uint32_t>>;
 
 struct target_stat {
 	uint32_t sample_count{};
@@ -32,8 +33,8 @@ struct oracle_leaf {
 	// feature_keys is sorted and unique; feature_offsets has size
 	// feature_keys.size() + 1 and slices the parallel entry_targets / entry_counts
 	// arrays. Each feature's slice is sorted ascending by target.
-	std::vector<feature_id> feature_keys;
-	std::vector<uint32_t> feature_offsets;
+	std::vector<feature_id> feature_keys; // index to feature offsets
+	std::vector<uint32_t> feature_offsets; // indices to entry + counts
 	std::vector<token_id> entry_targets;
 	std::vector<uint32_t> entry_counts;
 };
@@ -166,9 +167,7 @@ double context_distance(const A& a, const B& b) {
 	return 1. - static_cast<double>(overlap) / den;
 }
 
-using feature_accumulator = std::unordered_map<feature_id, std::unordered_map<token_id, uint32_t>>;
-
-inline void train(oracle_leaf& leaf, feature_accumulator& features, const context_view& ctx, token_id target) {
+inline void train(oracle_leaf& leaf, feature_map& features, const context_view& ctx, token_id target) {
 	assert(target < leaf.target_stats.size());
 
 	++leaf.sample_count;
@@ -180,8 +179,7 @@ inline void train(oracle_leaf& leaf, feature_accumulator& features, const contex
 	}
 }
 
-// Compacts the temporary feature accumulator into the leaf's flat CSR arrays.
-inline void finalize_leaf(oracle_leaf& leaf, const feature_accumulator& features) {
+inline void finalize_leaf(oracle_leaf& leaf, const feature_map& features) {
 	leaf.feature_keys.reserve(features.size());
 	for (const auto& [feature, _] : features) {
 		leaf.feature_keys.push_back(feature);
@@ -193,8 +191,8 @@ inline void finalize_leaf(oracle_leaf& leaf, const feature_accumulator& features
 
 	std::vector<std::pair<token_id, uint32_t>> ordered;
 	for (const auto feature : leaf.feature_keys) {
-		const auto& counts = features.at(feature);
-		ordered.assign(counts.begin(), counts.end());
+		const auto& token_target_counts = features.at(feature);
+		ordered.assign(token_target_counts.begin(), token_target_counts.end());
 		std::ranges::sort(ordered, {}, &std::pair<token_id, uint32_t>::first);
 		for (const auto& [target, count] : ordered) {
 			leaf.entry_targets.push_back(target);
@@ -239,11 +237,12 @@ inline std::vector<double> predict_logits(const oracle_leaf& leaf, const context
 		const std::size_t entry_end = leaf.feature_offsets[feature_index + 1];
 		for (std::size_t j = entry_begin; j < entry_end; ++j) {
 			logits[leaf.entry_targets[j]] += std::log(static_cast<double>(leaf.entry_counts[j]) + smoothing) - log_smoothing;
+			assert(std::isfinite(logits[leaf.entry_targets[j]]));
 		}
 	}
 
 	if (present_features != 0) {
-		const double scale = static_cast<double>(present_features);
+		const double scale = present_features;
 		for (std::size_t target = 0; target < targets; ++target) {
 			const auto total = leaf.target_stats[target].feature_count;
 			const double den = static_cast<double>(total) + smoothing * vocabulary_size;
@@ -262,7 +261,7 @@ inline uint32_t build_leaf(oracle_tree& tree, const oracle_forest_config& cfg,
 	const auto leaf_index = static_cast<uint32_t>(tree.leaves.size());
 	auto& leaf = tree.leaves.emplace_back();
 	leaf.target_stats.resize(cfg.vocab_size);
-	feature_accumulator features;
+	feature_map features;
 	for (const auto index : partition) {
 		const auto& context = context_views[index];
 		train(leaf, features, context, context.next_token());
