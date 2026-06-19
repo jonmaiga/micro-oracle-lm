@@ -74,9 +74,6 @@ inline context make_context_at(const std::vector<token_id>& tokens, uint32_t ind
 	return ctx;
 }
 
-// A training position referenced lazily into its token stream. The context and
-// next token are derived on demand instead of materialized per event, keeping
-// memory proportional to the corpus rather than corpus * context_size.
 struct event {
 	const std::vector<token_id>* tokens{};
 	uint32_t index{};
@@ -279,68 +276,62 @@ private:
 	std::vector<leaf_model> _leaves;
 };
 
-class micro_oracle_lm {
-public:
-	explicit micro_oracle_lm(const config& cfg) : _cfg(cfg) {
+using oracle_forest = std::vector<std::vector<tree>>;
+
+inline oracle_forest train(const config& cfg, const std::vector<std::vector<token_id>>& samples) {
+	oracle_forest forest(cfg.vocab_size);
+
+	std::vector<std::vector<event>> events(cfg.vocab_size);
+	for (const auto& sample : samples) {
+		for (std::size_t i = 0; i + 1 < sample.size(); ++i) {
+			events[sample[i]].push_back({&sample, static_cast<uint32_t>(i)});
+		}
 	}
 
-	void train(const std::vector<std::vector<token_id>>& samples) {
-		_models.assign(_cfg.vocab_size, {});
-
-		std::vector<std::vector<event>> events(_cfg.vocab_size);
-		for (const auto& sample : samples) {
-			for (std::size_t i = 0; i + 1 < sample.size(); ++i) {
-				events[sample[i]].push_back({&sample, static_cast<uint32_t>(i)});
-			}
-		}
-
-		const int token_count = static_cast<int>(_models.size());
+	const int token_count = static_cast<int>(forest.size());
 #pragma omp parallel for schedule(dynamic, 1)
-		for (int token = 0; token < token_count; ++token) {
-			auto& token_events = events[token];
-			if (token_events.empty()) {
-				continue;
-			}
-			mx3random rng(token);
-			std::vector<uint32_t> indices(token_events.size());
-			std::iota(indices.begin(), indices.end(), 0u);
-			auto& trees = _models[token];
-			trees.reserve(_cfg.ensemble_size);
-			for (uint32_t t = 0; t < _cfg.ensemble_size; ++t) {
-				auto& tr = trees.emplace_back(_cfg);
-				tr.build(token_events, indices, rng);
-			}
+	for (int token = 0; token < token_count; ++token) {
+		auto& token_events = events[token];
+		if (token_events.empty()) {
+			continue;
+		}
+		mx3random rng(token);
+		std::vector<uint32_t> indices(token_events.size());
+		std::iota(indices.begin(), indices.end(), 0u);
+		auto& trees = forest[token];
+		trees.reserve(cfg.ensemble_size);
+		for (uint32_t t = 0; t < cfg.ensemble_size; ++t) {
+			auto& tr = trees.emplace_back(cfg);
+			tr.build(token_events, indices, rng);
 		}
 	}
 
-	std::vector<double> predict(const std::vector<token_id>& tokens, uint32_t index_to_predict) const {
-		assert(index_to_predict < tokens.size());
+	return forest;
+}
 
-		const auto current = tokens[index_to_predict];
-		if (current >= _models.size() || _models[current].empty()) {
-			// todo: oov
-			return std::vector(_cfg.vocab_size, 1. / _cfg.vocab_size);
-		}
+inline std::vector<double> predict(const config& cfg, const oracle_forest& forest, const std::vector<token_id>& tokens, uint32_t index_to_predict) {
+	assert(index_to_predict < tokens.size());
 
-		const auto ctx = make_context_at(tokens, index_to_predict, _cfg.context_size, _cfg.vocab_size);
-		const auto& trees = _models[current];
-
-		std::vector<double> probabilities(_cfg.vocab_size);
-		for (const auto& t : trees) {
-			t.predict_into(ctx, probabilities);
-		}
-		const auto inv = 1. / static_cast<double>(trees.size());
-		for (auto& v : probabilities) {
-			v *= inv;
-		}
-
-		softmax_normalize(probabilities, _cfg.softmax_temperature);
-
-		return probabilities;
+	const auto current = tokens[index_to_predict];
+	if (current >= forest.size() || forest[current].empty()) {
+		// todo: oov
+		return std::vector(cfg.vocab_size, 1. / cfg.vocab_size);
 	}
 
-private:
-	config _cfg;
-	std::vector<std::vector<tree>> _models;
-};
+	const auto ctx = make_context_at(tokens, index_to_predict, cfg.context_size, cfg.vocab_size);
+	const auto& trees = forest[current];
+
+	std::vector<double> probabilities(cfg.vocab_size);
+	for (const auto& t : trees) {
+		t.predict_into(ctx, probabilities);
+	}
+	const auto inv = 1. / static_cast<double>(trees.size());
+	for (auto& v : probabilities) {
+		v *= inv;
+	}
+
+	softmax_normalize(probabilities, cfg.softmax_temperature);
+
+	return probabilities;
+}
 }

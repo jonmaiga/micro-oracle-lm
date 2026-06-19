@@ -50,12 +50,15 @@ std::vector<token_id> load_dataset(const std::string& path, vocabulary& vocab) {
 
 
 // Samples a single name by repeatedly predicting the next token until the
-std::string generate(const micro_oracle::micro_oracle_lm& model, const vocabulary& vocab,
-                     std::mt19937& rng, int num_tokens) {
+std::string generate(
+	const micro_oracle::config& config,
+	const micro_oracle::oracle_forest& forest,
+	const vocabulary& vocab,
+	std::mt19937& rng, int num_tokens) {
 	std::vector<token_id> tokens{0};
 	std::string text;
 	for (int i = 0; i < num_tokens; ++i) {
-		const auto probabilities = model.predict(tokens, static_cast<uint32_t>(tokens.size() - 1));
+		const auto probabilities = predict(config, forest, tokens, static_cast<uint32_t>(tokens.size() - 1));
 		assert(!probabilities.empty());
 
 		std::discrete_distribution<uint32_t> dist(probabilities.begin(), probabilities.end());
@@ -107,14 +110,13 @@ uint64_t no_change_hash(micro_oracle::config config) {
 
 	config.vocab_size = vocab_size;
 
-	micro_oracle::micro_oracle_lm model(config);
-	model.train(samples);
+	auto forest = micro_oracle::train(config, {samples});
 
 	uint64_t hash = 1;
 	for (int i = 0; i < 1000; ++i) {
 		const auto tokens = random_tokens(r, r.between(0, 60), 2 * vocab_size);
 		for (uint32_t pos = 0; pos < tokens.size(); ++pos) {
-			for (const auto value : model.predict(tokens, pos)) {
+			for (const auto value : micro_oracle::predict(config, forest, tokens, pos)) {
 				hash ^= std::hash<double>{}(value);
 			}
 		}
@@ -134,7 +136,7 @@ void check_integrity() {
 // Computes bits-per-byte (the average negative base-2 log-likelihood the model
 // assigns to each actual next token) over the held-out tokens. Each token maps
 // to one byte, so cross-entropy per token equals bits per byte.
-double compute_bpb(const micro_oracle::micro_oracle_lm& model, const std::vector<token_id>& tokens) {
+double compute_bpb(const micro_oracle::config& cfg, const micro_oracle::oracle_forest& forest, const std::vector<token_id>& tokens) {
 	constexpr double epsilon = 1e-12;
 	const std::int64_t count = tokens.size() > 1 ? static_cast<std::int64_t>(tokens.size()) - 1 : 0;
 
@@ -144,7 +146,7 @@ double compute_bpb(const micro_oracle::micro_oracle_lm& model, const std::vector
 	double total_bits = 0.;
 #pragma omp parallel for schedule(dynamic, 512) reduction(+ : total_bits)
 	for (std::int64_t i = 0; i < count; ++i) {
-		const auto probabilities = model.predict(tokens, static_cast<uint32_t>(i));
+		const auto probabilities = predict(cfg, forest, tokens, static_cast<uint32_t>(i));
 		const token_id actual = tokens[i + 1];
 		assert(actual < probabilities.size());
 		const double p = probabilities[actual];
@@ -167,14 +169,13 @@ void evaluate_held_out_bpb(const micro_oracle::config& base_cfg, const std::vect
 	std::cout << "Held-out evaluation: training on " << train_tokens.size()
 		<< " bytes, testing on " << test_tokens.size() << " bytes.\n";
 
-	micro_oracle::micro_oracle_lm model(base_cfg);
 	auto train_start = std::chrono::steady_clock::now();
-	model.train({train_tokens});
+	const auto forest = train(base_cfg, {train_tokens});
 	auto train_end = std::chrono::steady_clock::now();
 	const auto train_seconds = std::chrono::duration<double>(train_end - train_start).count();
 
 	auto eval_start = std::chrono::steady_clock::now();
-	const double bpb = compute_bpb(model, test_tokens);
+	const double bpb = compute_bpb(base_cfg, forest, test_tokens);
 	auto eval_end = std::chrono::steady_clock::now();
 	const auto eval_seconds = std::chrono::duration<double>(eval_end - eval_start).count();
 
@@ -205,20 +206,20 @@ int main(int argc, char** argv) {
 	cfg.softmax_temperature = 1.;
 	cfg.max_depth = 8;
 	cfg.ensemble_size = 8;
-	micro_oracle::micro_oracle_lm model(cfg);
 
 	evaluate_held_out_bpb(cfg, sample);
 
+
 	std::cout << "Training...\n";
 	auto train_start = std::chrono::steady_clock::now();
-	model.train({sample});
+	auto forest = micro_oracle::train(cfg, {sample});
 	auto train_end = std::chrono::steady_clock::now();
 	const auto train_seconds = std::chrono::duration<double>(train_end - train_start).count();
 	std::cout << "Training complete (" << train_seconds << " s). Generating...\n";
 
 	std::mt19937 rng(42);
 	auto generate_start = std::chrono::steady_clock::now();
-	std::cout << generate(model, vocab, rng, 10000) << '\n';
+	std::cout << generate(cfg, forest, vocab, rng, 10000) << '\n';
 	auto generate_end = std::chrono::steady_clock::now();
 	const auto generate_seconds = std::chrono::duration<double>(generate_end - generate_start).count();
 	std::cout << "Generation time: " << generate_seconds << " s\n";
