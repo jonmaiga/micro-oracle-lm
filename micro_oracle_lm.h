@@ -192,91 +192,103 @@ private:
 	std::unordered_map<feature_id, std::unordered_map<token_id, uint32_t>> _feature_map;
 };
 
-class tree {
-public:
-	tree(const config& cfg) :
-		_cfg(cfg) {
-	}
-
-	void build(std::span<const event> events, std::vector<uint32_t> event_indices, mx3random& rng) {
-		_nodes.clear();
-		_leaves.clear();
-		build_node(events, event_indices, 0, rng);
-	}
-
-	void predict_into(const context& ctx, std::vector<double>& out) const {
-		const auto node_index = route(ctx);
-		_leaves[_nodes[node_index].leaf_index].predict_into(ctx, out, _cfg.smoothing);
-	}
-
-private:
-	struct node {
-		bool leaf{true};
-		context center_context;
-		double radius{};
-		uint32_t inner{};
-		uint32_t outer{};
-		uint32_t leaf_index{};
-	};
-
-	uint32_t route(const context& ctx) const {
-		uint32_t node_index = 0;
-		while (!_nodes[node_index].leaf) {
-			const auto& n = _nodes[node_index];
-			node_index = distance(ctx, n.center_context) < n.radius ? n.inner : n.outer;
-		}
-		return node_index;
-	}
-
-	uint32_t build_node(std::span<const event> events, std::span<uint32_t> event_indices, uint32_t depth, mx3random& rng) {
-		const auto event_count = event_indices.size();
-		if (depth >= _cfg.max_depth || event_count < 2) {
-			return build_leaf(events, event_indices);
-		}
-
-		std::uniform_int_distribution<std::size_t> dist(0, event_count - 1);
-		const auto center_ctx = events[event_indices[dist(rng)]].ctx(_cfg.context_size, _cfg.vocab_size);
-		constexpr int radius_samples = 7;
-		double radius = 0.;
-		for (int i = 0; i < 7; ++i) {
-			radius += distance(events[event_indices[dist(rng)]].ctx(_cfg.context_size, _cfg.vocab_size), center_ctx);
-		}
-		radius /= radius_samples;
-
-		const auto split = std::ranges::stable_partition(event_indices, [&](const auto index) {
-			return distance(events[index].ctx(_cfg.context_size, _cfg.vocab_size), center_ctx) < radius;
-		});
-		if (split.empty() || split.size() == event_count) {
-			return build_leaf(events, event_indices);
-		}
-
-		const auto mid = static_cast<std::size_t>(split.begin() - event_indices.begin());
-		const auto node_index = _nodes.size();
-		_nodes.push_back({.leaf = false, .center_context = center_ctx, .radius = radius});
-		_nodes[node_index].inner = build_node(events, event_indices.first(mid), depth + 1, rng);
-		_nodes[node_index].outer = build_node(events, event_indices.subspan(mid), depth + 1, rng);
-		return static_cast<uint32_t>(node_index);
-	}
-
-	uint32_t build_leaf(std::span<const event> events, std::span<const uint32_t> source) {
-		const auto leaf_index = static_cast<uint32_t>(_leaves.size());
-		auto& leaf = _leaves.emplace_back(_cfg.vocab_size);
-		for (const auto index : source) {
-			const auto& e = events[index];
-			leaf.observe(e.ctx(_cfg.context_size, _cfg.vocab_size), e.next());
-		}
-
-		const auto node_index = _nodes.size();
-		_nodes.push_back({.leaf = true, .leaf_index = leaf_index});
-		return static_cast<uint32_t>(node_index);
-	}
-
-	config _cfg;
-	std::vector<node> _nodes;
-	std::vector<leaf_model> _leaves;
+struct oracle_node {
+	bool leaf{true};
+	context center_context;
+	double radius{};
+	uint32_t inner{};
+	uint32_t outer{};
+	uint32_t leaf_index{};
 };
 
-using oracle_forest = std::vector<std::vector<tree>>;
+struct oracle_tree {
+	std::vector<oracle_node> nodes;
+	std::vector<leaf_model> leaves;
+};
+
+struct oracle_tree_build_config {
+	uint32_t max_depth;
+	uint32_t context_size;
+	uint32_t vocab_size;
+	std::span<const event> events;
+};
+
+inline uint32_t build_leaf(oracle_tree& tree, const uint32_t vocab_size, const uint32_t context_size,
+                           std::span<const event> events,
+                           std::span<const uint32_t> source) {
+	const auto leaf_index = static_cast<uint32_t>(tree.leaves.size());
+	auto& leaf = tree.leaves.emplace_back(vocab_size);
+	for (const auto index : source) {
+		const auto& e = events[index];
+		leaf.observe(e.ctx(context_size, vocab_size), e.next());
+	}
+
+	const auto node_index = tree.nodes.size();
+	tree.nodes.push_back({.leaf = true, .leaf_index = leaf_index});
+	return static_cast<uint32_t>(node_index);
+}
+
+inline uint32_t build_tree_recursively(oracle_tree& tree, const oracle_tree_build_config& cfg, std::span<uint32_t> event_indices, uint32_t depth, mx3random& rng) {
+	const auto& events = cfg.events;
+	const auto event_count = event_indices.size();
+	if (depth >= cfg.max_depth || event_count < 2) {
+		return build_leaf(tree, cfg.vocab_size, cfg.context_size, events, event_indices);
+	}
+
+	std::uniform_int_distribution<std::size_t> dist(0, event_count - 1);
+	const auto center_ctx = events[event_indices[dist(rng)]].ctx(cfg.context_size, cfg.vocab_size);
+	constexpr int radius_samples = 7;
+	double radius = 0.;
+	for (int i = 0; i < 7; ++i) {
+		radius += distance(events[event_indices[dist(rng)]].ctx(cfg.context_size, cfg.vocab_size), center_ctx);
+	}
+	radius /= radius_samples;
+
+	const auto split = std::ranges::stable_partition(event_indices, [&](const auto index) {
+		return distance(events[index].ctx(cfg.context_size, cfg.vocab_size), center_ctx) < radius;
+	});
+	if (split.empty() || split.size() == event_count) {
+		return build_leaf(tree, cfg.vocab_size, cfg.context_size, events, event_indices);
+	}
+
+	const auto mid = static_cast<std::size_t>(split.begin() - event_indices.begin());
+	auto& nodes = tree.nodes;
+	const auto node_index = nodes.size();
+	nodes.push_back({.leaf = false, .center_context = center_ctx, .radius = radius});
+	nodes[node_index].inner = build_tree_recursively(tree, cfg, event_indices.first(mid), depth + 1, rng);
+	nodes[node_index].outer = build_tree_recursively(tree, cfg, event_indices.subspan(mid), depth + 1, rng);
+	return static_cast<uint32_t>(node_index);
+}
+
+
+inline oracle_tree build_tree(const config& cfg, std::span<const event> events, std::vector<uint32_t> indices, mx3random& rng) {
+	oracle_tree tree;
+	build_tree_recursively(tree, {
+		                       .max_depth = cfg.max_depth,
+		                       .context_size = cfg.context_size,
+		                       .vocab_size = cfg.vocab_size,
+		                       .events = events,
+	                       },
+	                       indices,
+	                       0, rng);
+	return tree;
+}
+
+inline uint32_t route(const oracle_tree& tree, const context& ctx) {
+	uint32_t node_index = 0;
+	while (!tree.nodes[node_index].leaf) {
+		const auto& n = tree.nodes[node_index];
+		node_index = distance(ctx, n.center_context) < n.radius ? n.inner : n.outer;
+	}
+	return node_index;
+}
+
+inline void predict_into(const oracle_tree& tree, const context& ctx, std::vector<double>& out, double smoothing) {
+	const auto node_index = route(tree, ctx);
+	tree.leaves[tree.nodes[node_index].leaf_index].predict_into(ctx, out, smoothing);
+}
+
+using oracle_forest = std::vector<std::vector<oracle_tree>>;
 
 inline oracle_forest train(const config& cfg, const std::vector<std::vector<token_id>>& samples) {
 	oracle_forest forest(cfg.vocab_size);
@@ -301,8 +313,7 @@ inline oracle_forest train(const config& cfg, const std::vector<std::vector<toke
 		auto& trees = forest[token];
 		trees.reserve(cfg.ensemble_size);
 		for (uint32_t t = 0; t < cfg.ensemble_size; ++t) {
-			auto& tr = trees.emplace_back(cfg);
-			tr.build(token_events, indices, rng);
+			trees.push_back(build_tree(cfg, token_events, indices, rng));
 		}
 	}
 
@@ -323,7 +334,7 @@ inline std::vector<double> predict(const config& cfg, const oracle_forest& fores
 
 	std::vector<double> probabilities(cfg.vocab_size);
 	for (const auto& t : trees) {
-		t.predict_into(ctx, probabilities);
+		predict_into(t, ctx, probabilities, cfg.smoothing);
 	}
 	const auto inv = 1. / static_cast<double>(trees.size());
 	for (auto& v : probabilities) {
