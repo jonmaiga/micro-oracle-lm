@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
@@ -17,6 +18,36 @@ namespace of {
 using token_id = uint32_t;
 using feature_id = uint64_t;
 using context = std::vector<feature_id>;
+
+// Maps input bytes to dense token ids, assigning new ids on first sight.
+class vocabulary {
+public:
+	token_id encode(unsigned char c) {
+		auto& slot = _char_to_token[c];
+		if (slot == 0) {
+			slot = static_cast<token_id>(_token_to_char.size());
+			_token_to_char.push_back(static_cast<char>(c));
+		}
+		return slot;
+	}
+
+	token_id lookup(unsigned char c) const {
+		auto& slot = _char_to_token[c];
+		return slot == 0 ? size() : slot;
+	}
+
+	char decode(token_id token) const {
+		return _token_to_char[token];
+	}
+
+	uint32_t size() const {
+		return static_cast<uint32_t>(_token_to_char.size());
+	}
+
+private:
+	std::array<token_id, 256> _char_to_token{};
+	std::vector<char> _token_to_char;
+};
 
 struct target_stat {
 	uint32_t sample_count{};

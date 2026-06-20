@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "micro_oracle_lm.h"
+#include "micro_oracle_tokenizer.h"
 #include "utils.h"
 
 namespace {
@@ -33,6 +34,16 @@ std::vector<token_id> random_tokens(mx3random& r, uint32_t length, uint32_t voca
 		tokens.push_back(token_dist(r));
 	}
 	return tokens;
+}
+
+std::string random_text(mx3random& r, uint32_t length, uint32_t alphabet_size) {
+	std::uniform_int_distribution<uint32_t> char_dist(0, alphabet_size - 1);
+	std::string text;
+	text.reserve(length);
+	for (uint32_t i = 0; i < length; ++i) {
+		text.push_back(static_cast<char>('a' + char_dist(r)));
+	}
+	return text;
 }
 
 uint64_t no_change_hash(of::oracle_forest_config config) {
@@ -62,12 +73,44 @@ uint64_t no_change_hash(of::oracle_forest_config config) {
 	return hash;
 }
 
+uint64_t tokenizer_no_change_hash(of::oracle_tokenizer_config config) {
+	constexpr uint32_t alphabet_size = 8;
+	mx3random r(1234);
+	std::uniform_int_distribution<uint32_t> sample_size_dist(0, 50);
+
+	std::vector<std::string> samples;
+	samples.reserve(200);
+	for (int i = 0; i < 200; ++i) {
+		samples.push_back(random_text(r, sample_size_dist(r), alphabet_size));
+	}
+
+	const auto tokenizer = of::build_oracle_tokenizer(config, samples);
+
+	uint64_t hash = 1;
+	hash ^= std::hash<std::size_t>{}(tokenizer.tokens.size());
+	std::uniform_int_distribution<uint32_t> test_sample_size_dist(0, 60);
+	for (int i = 0; i < 1000; ++i) {
+		const auto text = random_text(r, test_sample_size_dist(r), alphabet_size);
+		for (const auto token : of::encode(tokenizer, text)) {
+			hash ^= std::hash<of::token_id>{}(token);
+		}
+	}
+	return hash;
+}
+
 void check_integrity() {
 	constexpr uint64_t expected_hash = 7754232585735092045ull;
 
 	const auto hash = no_change_hash({.context_size = 5, .max_depth = 8, .ensemble_size = 4});
 	if (hash != expected_hash) {
 		std::cout << "WARN: the new hash " << hash << " differs from expected hash " << expected_hash << ". Intentional behavior change?\n";
+	}
+
+	constexpr uint64_t expected_tokenizer_hash = 16296053255964421837ull;
+
+	const auto tokenizer_hash = tokenizer_no_change_hash({.max_subunits = 64, .surprise_bits = 3.0, .forest = {.context_size = 5, .max_depth = 8, .ensemble_size = 4}});
+	if (tokenizer_hash != expected_tokenizer_hash) {
+		std::cout << "WARN: the new tokenizer hash " << tokenizer_hash << " differs from expected hash " << expected_tokenizer_hash << ". Intentional behavior change?\n";
 	}
 }
 } // namespace
@@ -89,10 +132,10 @@ int main(int argc, char** argv) {
 	const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/fineweb_ultra_mini/2013_20_001.csv";
 
 	auto sample = load_dataset(path, max_size);
-	//auto s2 = load_dataset("C:/tmp/datasets/tiny_stories/TinyStoriesV2.txt", sample.size());
+	auto s2 = load_dataset("C:/tmp/datasets/tiny_stories/TinyStoriesV2.txt", sample.size());
 	//auto s3 = load_dataset("C:/tmp/datasets/tiny_shakespeare/train.txt", sample.size());
 	//auto s4 = load_dataset("C:/tmp/datasets/fineweb_ultra_mini/2013_20_001.csv", sample.size());
-	//sample.insert(sample.end(), s2.begin(), s2.end());
+	sample.insert(sample.end(), s2.begin(), s2.end());
 	//sample.insert(sample.end(), s3.begin(), s3.end());
 	//sample.insert(sample.end(), s4.begin(), s4.end());
 
@@ -107,6 +150,9 @@ int main(int argc, char** argv) {
 	cfg.max_depth = 8;
 	cfg.ensemble_size = 8;
 	cfg.context_size = 6;
+
+	of::test_tokenizer({.max_subunits = 1000, .surprise_bits = 4.0, .forest = cfg}, sample);
+
 	evaluate_held_out_bpb(cfg, sample);
 
 	return 0;

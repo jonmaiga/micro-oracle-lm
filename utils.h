@@ -1,40 +1,14 @@
 ﻿#pragma once
 
-#include <array>
+#include <chrono>
+#include <iostream>
+#include <string>
 #include <utility>
 
 #include "micro_oracle_lm.h"
+#include "micro_oracle_tokenizer.h"
 
 namespace of {
-class vocabulary {
-public:
-	token_id encode(unsigned char c) {
-		auto& slot = _char_to_token[c];
-		if (slot == 0) {
-			slot = static_cast<token_id>(_token_to_char.size());
-			_token_to_char.push_back(static_cast<char>(c));
-		}
-		return slot;
-	}
-
-	token_id lookup(unsigned char c) const {
-		auto& slot = _char_to_token[c];
-		return slot == 0 ? size() : slot;
-	}
-
-	char decode(token_id token) const {
-		return _token_to_char[token];
-	}
-
-	uint32_t size() const {
-		return static_cast<uint32_t>(_token_to_char.size());
-	}
-
-private:
-	std::array<token_id, 256> _char_to_token{};
-	std::vector<char> _token_to_char;
-};
-
 struct model_size_bytes {
 	std::size_t forest{};
 	std::size_t token_tree_vectors{};
@@ -172,6 +146,42 @@ std::string generate(
 		tokens.push_back(next);
 	}
 	return text;
+}
+
+
+// Trains a tokenizer on the sample and prints the most frequent learned subunits.
+inline void test_tokenizer(oracle_tokenizer_config cfg, const std::vector<unsigned char>& sample) {
+	// Split the byte stream into line-based samples so boundary detection and
+	// subunit counting can run in parallel across many sequences.
+	std::vector<std::string> samples;
+	std::string current;
+	for (const unsigned char byte : sample) {
+		current.push_back(static_cast<char>(byte));
+		if (byte == '\n') {
+			samples.push_back(std::move(current));
+			current.clear();
+		}
+	}
+	if (!current.empty()) {
+		samples.push_back(std::move(current));
+	}
+
+	std::cout << "Training tokenizer on " << samples.size() << " samples...\n";
+	auto train_start = std::chrono::steady_clock::now();
+	const auto tokenizer = build_oracle_tokenizer(cfg, samples);
+	auto train_end = std::chrono::steady_clock::now();
+	const auto train_seconds = std::chrono::duration<double>(train_end - train_start).count();
+	std::cout << "Tokenizer training time: " << train_seconds << " s\n";
+	std::cout << "Tokenizer vocab size: " << tokenizer.tokens.size() << ".\n";
+
+	// The first 256 tokens are single-byte fallbacks; learned multi-byte subunits
+	// follow in descending frequency order.
+	constexpr std::size_t byte_token_count = 256;
+	std::cout << "Top 20 subunits:\n";
+	for (std::size_t i = byte_token_count; i < tokenizer.tokens.size() && i < byte_token_count + 20; ++i) {
+		std::cout << "  " << (i - byte_token_count + 1) << ": \"" << tokenizer.tokens[i] << "\"\n";
+	}
+	std::cout << '\n';
 }
 
 
