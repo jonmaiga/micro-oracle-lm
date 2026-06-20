@@ -28,13 +28,8 @@ struct target_stat {
 struct oracle_leaf {
 	uint32_t sample_count{};
 	std::vector<target_stat> target_stats;
-
-	// Flat (CSR) feature store, built once per leaf and then read-only.
-	// feature_keys is sorted and unique; feature_offsets has size
-	// feature_keys.size() + 1 and slices the parallel entry_targets / entry_counts
-	// arrays. Each feature's slice is sorted ascending by target.
 	std::vector<feature_id> feature_keys; // index to feature offsets
-	std::vector<uint32_t> feature_offsets; // indices to entry + counts
+	std::vector<uint32_t> feature_offsets; // [start, stop, ...] indices to entry + counts 
 	std::vector<token_id> entry_targets;
 	std::vector<uint32_t> entry_counts;
 };
@@ -104,8 +99,7 @@ struct context_view {
 
 inline context_view make_context_view(const std::vector<token_id>& tokens, uint32_t index,
                                       uint32_t context_size, uint32_t vocab_size) {
-	const uint32_t count = index < context_size ? index : context_size;
-	return {.tokens = &tokens, .view_size = count, .index = index, .vocab_size = vocab_size};
+	return {.tokens = &tokens, .view_size = std::min(index, context_size), .index = index, .vocab_size = vocab_size};
 }
 
 inline context materialize(const context_view& view) {
@@ -119,7 +113,6 @@ inline context materialize(const context_view& view) {
 
 inline std::vector<double> softmax_normalize(const std::vector<double>& logits, double temperature) {
 	assert(temperature > 0);
-	assert(std::isfinite(temperature));
 	assert(!logits.empty());
 
 	std::vector<double> probabilities(logits.size());
@@ -215,15 +208,7 @@ inline std::vector<double> predict_logits(const oracle_leaf& leaf, const context
 		logits[target] = std::log((static_cast<double>(sample_count) + smoothing) / prior_den);
 	}
 
-	// Each present context feature contributes log((count + smoothing) / den[t]) to every
-	// target t, where den[t] = feature_count[t] + smoothing * V depends only on the target.
-	// The CSR slices are sparse, so almost every count is zero: fold the zero-count case into
-	// a closed-form dense baseline applied once, then correct only the nonzero entries. In the
-	// correction the -log(den[t]) term cancels, leaving log(count + smoothing) - log(smoothing).
-	// Algebraically identical to the dense double loop, but visits only the nonzero entries.
-	const auto vocabulary_size = static_cast<double>(leaf.feature_keys.size());
 	const double log_smoothing = std::log(smoothing);
-
 	uint32_t present_features = 0;
 	for (std::size_t i = 0; i < ctx.size(); ++i) {
 		const auto key = ctx[i];
@@ -235,6 +220,7 @@ inline std::vector<double> predict_logits(const oracle_leaf& leaf, const context
 		const auto feature_index = static_cast<std::size_t>(kit - leaf.feature_keys.begin());
 		const std::size_t entry_begin = leaf.feature_offsets[feature_index];
 		const std::size_t entry_end = leaf.feature_offsets[feature_index + 1];
+		// Nonzero CSR entries get this extra term over the zero-count baseline below.
 		for (std::size_t j = entry_begin; j < entry_end; ++j) {
 			logits[leaf.entry_targets[j]] += std::log(static_cast<double>(leaf.entry_counts[j]) + smoothing) - log_smoothing;
 			assert(std::isfinite(logits[leaf.entry_targets[j]]));
@@ -242,10 +228,12 @@ inline std::vector<double> predict_logits(const oracle_leaf& leaf, const context
 	}
 
 	if (present_features != 0) {
+		const auto unique_feature_count = static_cast<double>(leaf.feature_keys.size());
 		const double scale = present_features;
+		// Baseline: assume zero count for every matched context feature and target.
 		for (std::size_t target = 0; target < targets; ++target) {
 			const auto total = leaf.target_stats[target].feature_count;
-			const double den = static_cast<double>(total) + smoothing * vocabulary_size;
+			const double den = static_cast<double>(total) + smoothing * unique_feature_count;
 			logits[target] += scale * (log_smoothing - std::log(den));
 			assert(std::isfinite(logits[target]));
 		}
@@ -263,8 +251,8 @@ inline uint32_t build_leaf(oracle_tree& tree, const oracle_forest_config& cfg,
 	leaf.target_stats.resize(cfg.vocab_size);
 	feature_map features;
 	for (const auto index : partition) {
-		const auto& context = context_views[index];
-		train(leaf, features, context, context.next_token());
+		const auto& ctx = context_views[index];
+		train(leaf, features, ctx, ctx.next_token());
 	}
 	finalize_leaf(leaf, features);
 
@@ -290,19 +278,18 @@ inline uint32_t build_tree_recursively(oracle_tree& tree, const oracle_forest_co
 	}
 	radius /= radius_samples;
 
-	const auto split = std::ranges::stable_partition(partition, [&](const auto index) {
+	const auto outer_partition = std::ranges::stable_partition(partition, [&](const auto index) {
 		return context_distance(contexts[index], center_ctx) < radius;
 	});
-	if (split.empty() || split.size() == count) {
+	if (outer_partition.empty() || outer_partition.size() == count) {
 		return build_leaf(tree, cfg, contexts, partition);
 	}
 
-	const auto mid = static_cast<std::size_t>(split.begin() - partition.begin());
-	auto& nodes = tree.nodes;
-	const auto node_index = nodes.size();
-	nodes.push_back({.center_context = materialize(center_ctx), .radius = radius});
-	nodes[node_index].inner = build_tree_recursively(tree, cfg, contexts, partition.first(mid), depth + 1, rng);
-	nodes[node_index].outer = build_tree_recursively(tree, cfg, contexts, partition.subspan(mid), depth + 1, rng);
+	const auto mid = static_cast<std::size_t>(outer_partition.begin() - partition.begin());
+	const auto node_index = tree.nodes.size();
+	tree.nodes.push_back({.center_context = materialize(center_ctx), .radius = radius});
+	tree.nodes[node_index].inner = build_tree_recursively(tree, cfg, contexts, partition.first(mid), depth + 1, rng);
+	tree.nodes[node_index].outer = build_tree_recursively(tree, cfg, contexts, partition.subspan(mid), depth + 1, rng);
 	return static_cast<uint32_t>(node_index);
 }
 
@@ -321,11 +308,6 @@ inline uint32_t route(const oracle_tree& tree, const context_view& ctx) {
 	}
 	return node_index;
 }
-
-
-////
-/// Build and predict
-///
 
 inline oracle_forest build_oracle_forest(const oracle_forest_config& cfg, const std::vector<std::vector<token_id>>& samples) {
 	std::vector<std::vector<context_view>> token_contexts(cfg.vocab_size);
