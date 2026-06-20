@@ -15,60 +15,17 @@
 namespace {
 using of::token_id;
 
-class vocabulary {
-public:
-	token_id encode(unsigned char c) {
-		auto& slot = _char_to_token[c];
-		if (slot == 0) {
-			slot = static_cast<token_id>(_token_to_char.size());
-			_token_to_char.push_back(static_cast<char>(c));
-		}
-		return slot;
-	}
 
-	char decode(token_id token) const {
-		return _token_to_char[token];
-	}
-
-	uint32_t size() const {
-		return static_cast<uint32_t>(_token_to_char.size());
-	}
-
-private:
-	std::array<token_id, 256> _char_to_token{};
-	std::vector<char> _token_to_char;
-};
-
-std::vector<token_id> load_dataset(const std::string& path, vocabulary& vocab, std::size_t max_size = std::numeric_limits<std::size_t>::max()) {
+std::vector<unsigned char> load_dataset(const std::string& path, std::size_t max_size = std::numeric_limits<std::size_t>::max()) {
 	std::ifstream file(path, std::ios::binary);
 	assert(file);
-	std::vector<token_id> sample;
+	std::vector<unsigned char> sample;
 	for (char c; file.get(c) && sample.size() < max_size;) {
-		sample.push_back(vocab.encode(static_cast<unsigned char>(c)));
+		sample.push_back(c);
 	}
 	return sample;
 }
 
-
-std::string generate(
-	const of::oracle_forest& forest,
-	const vocabulary& vocab,
-	mx3random& rng,
-	int num_tokens,
-	double softmax_temperature) {
-	std::vector<token_id> tokens{0};
-	std::string text;
-	for (int i = 0; i < num_tokens; ++i) {
-		const auto probabilities = predict(forest, tokens, static_cast<uint32_t>(tokens.size() - 1), softmax_temperature);
-		assert(!probabilities.empty());
-
-		std::discrete_distribution<uint32_t> token_dist(probabilities.begin(), probabilities.end());
-		const token_id next = token_dist(rng);
-		text.push_back(vocab.decode(next));
-		tokens.push_back(next);
-	}
-	return text;
-}
 
 std::vector<token_id> random_tokens(mx3random& r, uint32_t length, uint32_t vocab_size) {
 	std::uniform_int_distribution<token_id> token_dist(0, vocab_size - 1);
@@ -120,48 +77,39 @@ void check_integrity() {
 int main(int argc, char** argv) {
 	using namespace std::chrono_literals;
 
-	constexpr std::size_t max_size = 50000000;
-
-	const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/tiny_stories/TinyStoriesV2.txt";
-	//const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/names/names.txt";
-	//const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/2800_books/1610.txt";
-	//const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/wiki_sentences/wikisent2.txt";
-
 	check_integrity();
 
-	vocabulary vocab;
-	auto sample = load_dataset(path, vocab, max_size);
+	constexpr std::size_t max_size = 500000000;
+
+	const std::string base_path = "C:/tmp/datasets/";
+
+	//const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/tiny_stories/TinyStoriesV2.txt";
+	//const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/names/names.txt";
+	//const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/tiny_shakespeare/train.txt";
+	//const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/2800_books/1610.txt";
+	//const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/wiki_sentences/wikisent2.txt";
+	const std::string path = argc > 1 ? argv[1] : "C:/tmp/datasets/fineweb_ultra_mini/2013_20_001.csv";
+
+	auto sample = load_dataset(path, max_size);
+	//auto s2 = load_dataset("C:/tmp/datasets/tiny_stories/TinyStoriesV2.txt", sample.size());
+	//auto s3 = load_dataset("C:/tmp/datasets/tiny_shakespeare/train.txt", sample.size());
+	//auto s4 = load_dataset("C:/tmp/datasets/fineweb_ultra_mini/2013_20_001.csv", sample.size());
+	//sample.insert(sample.end(), s2.begin(), s2.end());
+	//sample.insert(sample.end(), s3.begin(), s3.end());
+	//sample.insert(sample.end(), s4.begin(), s4.end());
+
+
 	if (sample.empty()) {
-		std::cerr << "Failed to read any names from " << path << '\n';
+		std::cerr << "Failed to read sample from " << path << '\n';
 		return 1;
 	}
-	std::cout << "Loaded '" << path << "' vocab size: " << vocab.size() << ", bytes: " << sample.size() << ".\n";
+	std::cout << "Loaded '" << path << " bytes: " << sample.size() << ".\n";
 
 	of::oracle_forest_config cfg;
-	cfg.vocab_size = vocab.size();
 	cfg.max_depth = 8;
 	cfg.ensemble_size = 8;
-
+	cfg.context_size = 6;
 	evaluate_held_out_bpb(cfg, sample);
 
-
-	std::cout << "Training...\n";
-	auto train_start = std::chrono::steady_clock::now();
-	auto forest = of::build_oracle_forest(cfg, {sample});
-	auto train_end = std::chrono::steady_clock::now();
-	const auto train_seconds = std::chrono::duration<double>(train_end - train_start).count();
-	std::cout << "Training complete (" << train_seconds << " s).\n";
-	const auto size_stats = size_bytes(forest);
-	of::print_size_bytes(std::cout, size_stats);
-	std::cout << "Model size ratio: " << static_cast<double>(size_stats.serialized) / sample.size() << "\n\n";
-
-
-	std::cout << "Generating...\n";
-	mx3random rng(42);
-	auto generate_start = std::chrono::steady_clock::now();
-	std::cout << generate(forest, vocab, rng, 1000, 1.) << '\n';
-	auto generate_end = std::chrono::steady_clock::now();
-	const auto generate_seconds = std::chrono::duration<double>(generate_end - generate_start).count();
-	std::cout << "Generation time: " << generate_seconds << " s\n";
 	return 0;
 }

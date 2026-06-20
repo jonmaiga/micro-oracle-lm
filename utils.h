@@ -1,68 +1,38 @@
 ﻿#pragma once
 
 #include <utility>
-#include <unordered_map>
 
 #include "micro_oracle_lm.h"
 
 namespace of {
-// Computes bits-per-byte (the average negative base-2 log-likelihood the model
-// assigns to each actual next token) over the held-out tokens. Each token maps
-// to one byte, so cross-entropy per token equals bits per byte.
-double compute_bpb(const of::oracle_forest& forest, const std::vector<token_id>& tokens) {
-	constexpr double epsilon = 1e-12;
-	const std::int64_t count = tokens.size() > 1 ? static_cast<std::int64_t>(tokens.size()) - 1 : 0;
-
-	// predict() is a read-only, allocation-local operation, so positions can be
-	// scored independently and summed via a reduction (matches the OpenMP
-	// parallelism already used during training).
-	double total_bits = 0.;
-#pragma omp parallel for schedule(dynamic, 512) reduction(+ : total_bits)
-	for (std::int64_t i = 0; i < count; ++i) {
-		const auto probabilities = predict(forest, tokens, static_cast<uint32_t>(i), 1.0);
-		const token_id actual = tokens[i + 1];
-		assert(actual < probabilities.size());
-		const double p = probabilities[actual];
-		total_bits += -std::log2(std::max(p, epsilon));
-	}
-	return count == 0 ? 0. : total_bits / static_cast<double>(count);
-}
-
-// Trains a fresh model on the first 90% of the sample and reports bits-per-byte
-// on the remaining held-out portion, capped to 10 MiB of test data.
-void evaluate_held_out_bpb(const of::oracle_forest_config& base_cfg, const std::vector<token_id>& sample) {
-	if (sample.size() < 2) {
-		std::cerr << "Sample too small to evaluate held-out BPB.\n";
-		return;
+class vocabulary {
+public:
+	token_id encode(unsigned char c) {
+		auto& slot = _char_to_token[c];
+		if (slot == 0) {
+			slot = static_cast<token_id>(_token_to_char.size());
+			_token_to_char.push_back(static_cast<char>(c));
+		}
+		return slot;
 	}
 
-	constexpr std::size_t max_test_bytes = 1024ull * 1024ull;
-	std::size_t split = sample.size() * 9 / 10;
-	if (sample.size() - split > max_test_bytes) {
-		split = sample.size() - max_test_bytes;
+	token_id lookup(unsigned char c) const {
+		auto& slot = _char_to_token[c];
+		return slot == 0 ? size() : slot;
 	}
-	if (split >= sample.size()) {
-		std::cerr << "Sample too small to create a held-out test split.\n";
-		return;
+
+	char decode(token_id token) const {
+		return _token_to_char[token];
 	}
-	const std::vector<token_id> train_tokens(sample.begin(), sample.begin() + split);
-	const std::vector<token_id> test_tokens(sample.begin() + split, sample.end());
-	std::cout << "Held-out evaluation: training on " << train_tokens.size()
-		<< " bytes, testing on " << test_tokens.size() << " bytes.\n";
 
-	auto train_start = std::chrono::steady_clock::now();
-	const auto forest = build_oracle_forest(base_cfg, {train_tokens});
-	auto train_end = std::chrono::steady_clock::now();
-	const auto train_seconds = std::chrono::duration<double>(train_end - train_start).count();
+	uint32_t size() const {
+		return static_cast<uint32_t>(_token_to_char.size());
+	}
 
-	auto eval_start = std::chrono::steady_clock::now();
-	const double bpb = compute_bpb(forest, test_tokens);
-	auto eval_end = std::chrono::steady_clock::now();
-	const auto eval_seconds = std::chrono::duration<double>(eval_end - eval_start).count();
-
-	std::cout << "Held-out BPB: " << bpb << " bits/byte (train " << train_seconds
-		<< " s, eval " << eval_seconds << " s).\n";
-}
+private:
+	std::array<token_id, 256> _char_to_token{};
+	std::vector<char> _token_to_char;
+};
 
 struct model_size_bytes {
 	std::size_t forest{};
@@ -159,5 +129,101 @@ inline void print_size_bytes(std::ostream& out, const model_size_bytes& size) {
 
 inline void print_size_bytes(std::ostream& out, const oracle_forest& forest) {
 	print_size_bytes(out, size_bytes(forest));
+}
+
+// Computes bits-per-byte (the average negative base-2 log-likelihood the model
+// assigns to each actual next token) over the held-out tokens. Each token maps
+// to one byte, so cross-entropy per token equals bits per byte.
+inline double compute_bpb(const oracle_forest& forest, const std::vector<token_id>& tokens) {
+	constexpr double epsilon = 1e-12;
+	const std::int64_t count = tokens.size() > 1 ? static_cast<std::int64_t>(tokens.size()) - 1 : 0;
+
+	// predict() is a read-only, allocation-local operation, so positions can be
+	// scored independently and summed via a reduction (matches the OpenMP
+	// parallelism already used during training).
+	double total_bits = 0.;
+#pragma omp parallel for schedule(dynamic, 512) reduction(+ : total_bits)
+	for (std::int64_t i = 0; i < count; ++i) {
+		const auto probabilities = predict(forest, tokens, static_cast<uint32_t>(i), 1.0);
+		const token_id actual = tokens[i + 1];
+		assert(actual < probabilities.size());
+		const double p = probabilities[actual];
+		total_bits += -std::log2(std::max(p, epsilon));
+	}
+	return count == 0 ? 0. : total_bits / static_cast<double>(count);
+}
+
+std::string generate(
+	const of::oracle_forest& forest,
+	const of::vocabulary& vocab,
+	mx3random& rng,
+	int num_tokens,
+	double softmax_temperature) {
+	std::vector<token_id> tokens{0};
+	std::string text;
+	for (int i = 0; i < num_tokens; ++i) {
+		const auto probabilities = predict(forest, tokens, static_cast<uint32_t>(tokens.size() - 1), softmax_temperature);
+		assert(!probabilities.empty());
+
+		std::discrete_distribution<uint32_t> token_dist(probabilities.begin(), probabilities.end());
+		const token_id next = token_dist(rng);
+		text.push_back(vocab.decode(next));
+		tokens.push_back(next);
+	}
+	return text;
+}
+
+
+// Trains a fresh model on the first 90% of the sample and reports bits-per-byte
+// on the remaining held-out portion, capped to 10 MiB of test data.
+inline void evaluate_held_out_bpb(oracle_forest_config cfg, const std::vector<unsigned char>& sample) {
+	assert(sample.size() >= 2);
+
+	constexpr std::size_t max_test_bytes = 1024ull * 1024ull;
+	std::size_t split = sample.size() * 9 / 10;
+	if (sample.size() - split > max_test_bytes) {
+		split = sample.size() - max_test_bytes;
+	}
+	assert(split < sample.size());
+
+	vocabulary vocab;
+	std::vector<token_id> train_tokens;
+	train_tokens.reserve(split);
+	for (std::size_t i = 0; i < split; ++i) {
+		train_tokens.push_back(vocab.encode(sample[i]));
+	}
+
+	std::vector<token_id> test_tokens;
+	test_tokens.reserve(sample.size() - split);
+	for (std::size_t i = split; i < sample.size(); ++i) {
+		test_tokens.push_back(vocab.lookup(sample[i]));
+	}
+	cfg.vocab_size = vocab.size();
+
+	std::cout << "Held-out evaluation: training on " << train_tokens.size() << " bytes, testing on " << test_tokens.size() << " bytes.\n";
+
+	auto train_start = std::chrono::steady_clock::now();
+	const auto forest = build_oracle_forest(cfg, {train_tokens});
+	auto train_end = std::chrono::steady_clock::now();
+	const auto train_seconds = std::chrono::duration<double>(train_end - train_start).count();
+
+	auto eval_start = std::chrono::steady_clock::now();
+	const double bpb = compute_bpb(forest, test_tokens);
+	auto eval_end = std::chrono::steady_clock::now();
+	const auto eval_seconds = std::chrono::duration<double>(eval_end - eval_start).count();
+
+	std::cout << "Held-out BPB: " << bpb << " bits/byte (train " << train_seconds << " s, eval " << eval_seconds << " s).\n";
+
+	const auto size_stats = size_bytes(forest);
+	print_size_bytes(std::cout, size_stats);
+	std::cout << "Model size ratio: " << static_cast<double>(size_stats.serialized) / sample.size() << "\n\n";
+
+	std::cout << "Generating...\n";
+	mx3random rng(42);
+	auto generate_start = std::chrono::steady_clock::now();
+	std::cout << generate(forest, vocab, rng, 1000, 1.) << '\n';
+	auto generate_end = std::chrono::steady_clock::now();
+	const auto generate_seconds = std::chrono::duration<double>(generate_end - generate_start).count();
+	std::cout << "Generation time: " << generate_seconds << " s\n";
 }
 }
