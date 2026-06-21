@@ -25,7 +25,7 @@ struct transparent_string_hash {
 };
 
 struct oracle_tokenizer_config {
-	int max_subunits{4096};
+	int max_subunits{1000};
 	double surprise_bits{2.0};
 	oracle_forest_config forest{};
 };
