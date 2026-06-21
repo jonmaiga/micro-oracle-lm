@@ -42,7 +42,7 @@ using token_seq_map = std::unordered_map<std::vector<token_id>, Value, token_seq
 using subunit_counts = token_seq_map<std::size_t>;
 
 struct oracle_tokenizer_config {
-	int max_subunits{1000};
+	std::size_t max_subunits{1000};
 	double surprise_bits{2.0};
 };
 
@@ -52,37 +52,32 @@ struct oracle_tokenizer {
 	std::size_t max_length{1}; // longest subunit length (base tokens have length 1)
 };
 
-inline token_id add_token(oracle_tokenizer& tok, std::vector<token_id> subunit) {
-	const auto found = tok.ids.find(subunit);
-	if (found != tok.ids.end()) {
-		return found->second;
-	}
+inline void add_token(oracle_tokenizer& tok, std::vector<token_id> subunit) {
+	assert(!tok.ids.contains(subunit));
+
 	const auto id = static_cast<token_id>(tok.tokens.size());
 	tok.max_length = std::max(tok.max_length, subunit.size());
 	tok.ids.emplace(subunit, id);
 	tok.tokens.push_back(std::move(subunit));
-	return id;
 }
 
-inline bool by_count_desc(const std::pair<std::vector<token_id>, std::size_t>& lhs, const std::pair<std::vector<token_id>, std::size_t>& rhs) {
-	if (lhs.second != rhs.second) {
-		return lhs.second > rhs.second;
-	}
-	if (lhs.first.size() != rhs.first.size()) {
-		return lhs.first.size() > rhs.first.size();
-	}
-	return lhs.first < rhs.first;
-}
-
-inline std::vector<std::vector<token_id>> select_top_subunits(const subunit_counts& counts, int max_subunits) {
+inline std::vector<std::vector<token_id>> select_top_subunits(const subunit_counts& counts, std::size_t max_subunits) {
 	// Every counted subunit already has length >= 2 (see count_subunit).
 	std::vector<std::pair<std::vector<token_id>, std::size_t>> ranked(counts.begin(), counts.end());
 	// Always fully sort: by_count_desc is a total order on distinct sequences,
 	// so this makes the result independent of unordered_map iteration order
 	// (which is nondeterministic on MSVC due to randomized hashing).
-	std::ranges::sort(ranked, by_count_desc);
-	if (max_subunits >= 0 && ranked.size() > static_cast<std::size_t>(max_subunits)) {
-		ranked.resize(static_cast<std::size_t>(max_subunits));
+	std::ranges::sort(ranked, [](const auto& lhs, const auto& rhs) {
+		if (lhs.second != rhs.second) {
+			return lhs.second > rhs.second;
+		}
+		if (lhs.first.size() != rhs.first.size()) {
+			return lhs.first.size() > rhs.first.size();
+		}
+		return lhs.first < rhs.first;
+	});
+	if (ranked.size() > max_subunits) {
+		ranked.resize(max_subunits);
 	}
 	std::vector<std::vector<token_id>> subunits;
 	subunits.reserve(ranked.size());
@@ -132,9 +127,6 @@ inline subunit_counts measure_subunits(const oracle_tokenizer_config& cfg, const
 	// cheap relative to phase 1, so parallelizing over samples is sufficient.
 	const int thread_count = std::max(1, omp_get_max_threads());
 	std::vector<subunit_counts> local_counts(thread_count);
-	for (auto& local : local_counts) {
-		local.reserve(samples.size() / thread_count + 1);
-	}
 
 #pragma omp parallel for schedule(dynamic, 1) num_threads(thread_count)
 	for (int64_t s = 0; s < static_cast<int64_t>(samples.size()); ++s) {
@@ -181,32 +173,23 @@ inline oracle_tokenizer build_oracle_tokenizer(const oracle_tokenizer_config& cf
 	return tok;
 }
 
-struct token_match {
-	token_id id{};
-	std::size_t length{};
-};
-
-inline token_match find_match(const oracle_tokenizer& tok, std::span<const token_id> tokens, std::size_t pos) {
-	// Greedy longest match: try the longest possible subunit first, shrinking down.
-	// Every base token is always present, so the length-1 lookup always succeeds.
-	const auto max_length = std::min(tok.max_length, tokens.size() - pos);
-	for (std::size_t length = max_length; length >= 1; --length) {
-		const auto found = tok.ids.find(tokens.subspan(pos, length));
-		if (found != tok.ids.end()) {
-			return {found->second, length};
-		}
-	}
-	assert(false && "length-1 fallback must always match");
-	return {};
-}
-
 inline std::vector<token_id> encode(const oracle_tokenizer& tok, std::span<const token_id> tokens) {
 	std::vector<token_id> result;
-	std::size_t pos = 0;
-	while (pos < tokens.size()) {
-		const auto match = find_match(tok, tokens, pos);
-		result.push_back(match.id);
-		pos += match.length;
+	result.reserve(tokens.size());
+
+	for (std::size_t pos = 0; pos < tokens.size();) {
+		const auto max_length = std::min(tok.max_length, tokens.size() - pos);
+		bool matched = false;
+		for (std::size_t length = max_length; length >= 1; --length) {
+			const auto found = tok.ids.find(tokens.subspan(pos, length));
+			if (found != tok.ids.end()) {
+				result.push_back(found->second);
+				pos += length;
+				matched = true;
+				break;
+			}
+		}
+		assert(matched && "length-1 fallback must always match");
 	}
 	return result;
 }
