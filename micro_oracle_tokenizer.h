@@ -181,27 +181,32 @@ inline oracle_tokenizer build_oracle_tokenizer(const oracle_tokenizer_config& cf
 	return tok;
 }
 
-inline const std::pair<const std::vector<token_id>, token_id>* find_match(const oracle_tokenizer& tok, std::span<const token_id> tokens, std::size_t pos) {
+struct token_match {
+	token_id id{};
+	std::size_t length{};
+};
+
+inline token_match find_match(const oracle_tokenizer& tok, std::span<const token_id> tokens, std::size_t pos) {
 	// Greedy longest match: try the longest possible subunit first, shrinking down.
-	// Every base token is always present, so the length-1 fallback never misses.
+	// Every base token is always present, so the length-1 lookup always succeeds.
 	const auto max_length = std::min(tok.max_length, tokens.size() - pos);
 	for (std::size_t length = max_length; length >= 1; --length) {
 		const auto found = tok.ids.find(tokens.subspan(pos, length));
 		if (found != tok.ids.end()) {
-			return &*found;
+			return {found->second, length};
 		}
 	}
 	assert(false && "length-1 fallback must always match");
-	return nullptr;
+	return {};
 }
 
 inline std::vector<token_id> encode(const oracle_tokenizer& tok, std::span<const token_id> tokens) {
 	std::vector<token_id> result;
 	std::size_t pos = 0;
 	while (pos < tokens.size()) {
-		const auto* match = find_match(tok, tokens, pos);
-		result.push_back(match->second);
-		pos += match->first.size();
+		const auto match = find_match(tok, tokens, pos);
+		result.push_back(match.id);
+		pos += match.length;
 	}
 	return result;
 }
