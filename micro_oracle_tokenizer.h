@@ -114,8 +114,8 @@ inline subunit_counts measure_subunits(const oracle_tokenizer_config& cfg, const
 
 	subunit_counts counts;
 	for (auto& local : local_counts) {
-		for (auto& [subunit, count] : local) {
-			counts[subunit] += count;
+		for (auto& [unit, count] : local) {
+			counts[unit] += count;
 		}
 	}
 	return counts;
@@ -146,8 +146,8 @@ inline oracle_tokenizer build_oracle_tokenizer(const oracle_tokenizer_config& cf
 		add_token(tok, subunit{base});
 	}
 
-	for (auto& [subunit, _] : ranked) {
-		add_token(tok, std::move(subunit));
+	for (auto& [unit, _] : ranked) {
+		add_token(tok, std::move(unit));
 	}
 
 	return tok;
