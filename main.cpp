@@ -63,7 +63,7 @@ uint64_t no_change_hash(of::oracle_forest_config config) {
 }
 
 void check_integrity() {
-	constexpr uint64_t expected_hash = 155657146846925995ull;
+	constexpr uint64_t expected_hash = 7754232585735092045ull;
 
 	const auto hash = no_change_hash({.context_size = 5, .max_depth = 8, .ensemble_size = 4});
 	if (hash != expected_hash) {

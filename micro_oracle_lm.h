@@ -323,21 +323,30 @@ inline oracle_forest build_oracle_forest(const oracle_forest_config& cfg, const 
 	oracle_forest forest{.cfg = cfg};
 	forest.trees.resize(cfg.vocab_size);
 	const int token_count = static_cast<int>(forest.trees.size());
-#pragma omp parallel for schedule(dynamic, 1)
+	std::vector<std::vector<uint32_t>> partitions(token_count);
 	for (int token = 0; token < token_count; ++token) {
 		const auto& contexts = token_contexts[token];
 		if (contexts.empty()) {
 			continue;
 		}
-		mx3random rng(token);
-		std::vector<uint32_t> partition(contexts.size());
+		auto& partition = partitions[token];
+		partition.resize(contexts.size());
 		std::iota(partition.begin(), partition.end(), 0u);
-		auto& trees = forest.trees[token];
-		trees.reserve(cfg.ensemble_size);
+		forest.trees[token].resize(cfg.ensemble_size);
+	}
 
-		for (uint32_t t = 0; t < cfg.ensemble_size; ++t) {
-			trees.push_back(build_tree(cfg, contexts, partition, rng));
+	const auto task_count = static_cast<int64_t>(token_count) * static_cast<int64_t>(cfg.ensemble_size);
+#pragma omp parallel for schedule(dynamic, 1)
+	for (int64_t task = 0; task < task_count; ++task) {
+		const auto token = static_cast<int>(task / cfg.ensemble_size);
+		const auto& contexts = token_contexts[token];
+		if (contexts.empty()) {
+			continue;
 		}
+
+		const auto tree_index = static_cast<uint32_t>(task % cfg.ensemble_size);
+		mx3random rng(task);
+		forest.trees[token][tree_index] = build_tree(cfg, contexts, partitions[token], rng);
 	}
 
 	return forest;
