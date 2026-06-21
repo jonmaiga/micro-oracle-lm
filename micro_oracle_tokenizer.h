@@ -61,43 +61,6 @@ inline void add_token(oracle_tokenizer& tok, std::vector<token_id> subunit) {
 	tok.tokens.push_back(std::move(subunit));
 }
 
-inline std::vector<std::vector<token_id>> select_top_subunits(const subunit_counts& counts, std::size_t max_subunits) {
-	// Every counted subunit already has length >= 2 (see count_subunit).
-	std::vector<std::pair<std::vector<token_id>, std::size_t>> ranked(counts.begin(), counts.end());
-	// Always fully sort: by_count_desc is a total order on distinct sequences,
-	// so this makes the result independent of unordered_map iteration order
-	// (which is nondeterministic on MSVC due to randomized hashing).
-	std::ranges::sort(ranked, [](const auto& lhs, const auto& rhs) {
-		if (lhs.second != rhs.second) {
-			return lhs.second > rhs.second;
-		}
-		if (lhs.first.size() != rhs.first.size()) {
-			return lhs.first.size() > rhs.first.size();
-		}
-		return lhs.first < rhs.first;
-	});
-	if (ranked.size() > max_subunits) {
-		ranked.resize(max_subunits);
-	}
-	std::vector<std::vector<token_id>> subunits;
-	subunits.reserve(ranked.size());
-	for (auto& [subunit, _] : ranked) {
-		subunits.push_back(std::move(subunit));
-	}
-	return subunits;
-}
-
-inline void count_subunit(subunit_counts& counts, const std::vector<token_id>& sample, std::size_t first, std::size_t last) {
-	if (last - first >= 2) {
-		++counts[std::vector<token_id>(sample.begin() + first, sample.begin() + last)];
-	}
-}
-
-inline bool is_boundary(const oracle_forest& model, const std::vector<token_id>& sample, std::size_t index, double threshold) {
-	const auto probabilities = predict(model, sample, static_cast<uint32_t>(index), 1.0);
-	return probabilities[sample[index + 1]] < threshold;
-}
-
 inline subunit_counts measure_subunits(const oracle_tokenizer_config& cfg, const oracle_forest& model,
                                        const std::vector<std::vector<token_id>>& samples) {
 	const auto threshold = std::pow(2.0, -cfg.surprise_bits);
@@ -120,35 +83,37 @@ inline subunit_counts measure_subunits(const oracle_tokenizer_config& cfg, const
 		const auto next = std::ranges::upper_bound(offsets, static_cast<std::size_t>(g));
 		const auto s = static_cast<std::size_t>(next - offsets.begin()) - 1;
 		const auto i = static_cast<std::size_t>(g) - offsets[s];
-		boundaries[g] = is_boundary(model, samples[s], i, threshold);
+		const auto& sample = samples[s];
+		const auto probabilities = predict(model, sample, static_cast<uint32_t>(i), 1.0);
+		boundaries[g] = probabilities[sample[i + 1]] < threshold;
 	}
 
 	// Phase 2: slice samples at the detected boundaries and count subunits. This is
 	// cheap relative to phase 1, so parallelizing over samples is sufficient.
-	const int thread_count = std::max(1, omp_get_max_threads());
-	std::vector<subunit_counts> local_counts(thread_count);
+	std::vector<subunit_counts> local_counts(omp_get_max_threads());
 
-#pragma omp parallel for schedule(dynamic, 1) num_threads(thread_count)
+#pragma omp parallel for schedule(dynamic, 1)
 	for (int64_t s = 0; s < static_cast<int64_t>(samples.size()); ++s) {
 		auto& local = local_counts[omp_get_thread_num()];
 		const auto& sample = samples[s];
 		const auto base = offsets[s];
+		const auto count_subunit = [&](std::size_t first, std::size_t last) {
+			if (last - first >= 2) {
+				++local[std::vector<token_id>(sample.begin() + first, sample.begin() + last)];
+			}
+		};
+
 		std::size_t subunit_begin = 0;
 		for (std::size_t i = 0; i + 1 < sample.size(); ++i) {
 			if (boundaries[base + i]) {
-				count_subunit(local, sample, subunit_begin, i + 1);
+				count_subunit(subunit_begin, i + 1);
 				subunit_begin = i + 1;
 			}
 		}
-		count_subunit(local, sample, subunit_begin, sample.size());
+		count_subunit(subunit_begin, sample.size());
 	}
 
 	subunit_counts counts;
-	std::size_t total_unique = 0;
-	for (const auto& local : local_counts) {
-		total_unique += local.size();
-	}
-	counts.reserve(total_unique);
 	for (auto& local : local_counts) {
 		for (auto& [subunit, count] : local) {
 			counts[subunit] += count;
@@ -160,13 +125,29 @@ inline subunit_counts measure_subunits(const oracle_tokenizer_config& cfg, const
 inline oracle_tokenizer build_oracle_tokenizer(const oracle_tokenizer_config& cfg, const oracle_forest& model,
                                                const std::vector<std::vector<token_id>>& samples) {
 	const auto counts = measure_subunits(cfg, model, samples);
+	std::vector<std::pair<std::vector<token_id>, std::size_t>> ranked(counts.begin(), counts.end());
+	// Fully sort so the result is independent of unordered_map iteration order.
+	std::ranges::sort(ranked, [](const auto& lhs, const auto& rhs) {
+		if (lhs.second != rhs.second) {
+			return lhs.second > rhs.second;
+		}
+		if (lhs.first.size() != rhs.first.size()) {
+			return lhs.first.size() > rhs.first.size();
+		}
+		return lhs.first < rhs.first;
+	});
+	if (ranked.size() > cfg.max_subunits) {
+		ranked.resize(cfg.max_subunits);
+	}
 
 	oracle_tokenizer tok;
+	tok.tokens.reserve(model.cfg.vocab_size + ranked.size());
+	tok.ids.reserve(model.cfg.vocab_size + ranked.size());
 	for (token_id base = 0; base < model.cfg.vocab_size; ++base) {
 		add_token(tok, std::vector<token_id>{base});
 	}
 
-	for (auto& subunit : select_top_subunits(counts, cfg.max_subunits)) {
+	for (auto& [subunit, _] : ranked) {
 		add_token(tok, std::move(subunit));
 	}
 
