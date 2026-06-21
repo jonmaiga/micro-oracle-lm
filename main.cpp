@@ -77,7 +77,7 @@ int main(int argc, char** argv) {
 
 	check_integrity();
 
-	constexpr std::size_t max_size = 500000000;
+	constexpr std::size_t max_size = 5000000;
 
 	const std::string base_path = "C:/tmp/datasets/";
 

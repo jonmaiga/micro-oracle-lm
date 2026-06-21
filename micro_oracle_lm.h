@@ -8,7 +8,6 @@
 #include <numeric>
 #include <random>
 #include <span>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -18,7 +17,6 @@ namespace of {
 using token_id = uint32_t;
 using feature_id = uint64_t;
 using context = std::vector<feature_id>;
-using feature_map = std::unordered_map<feature_id, std::unordered_map<token_id, uint32_t>>;
 
 struct target_stat {
 	uint32_t sample_count{};
@@ -160,7 +158,43 @@ double context_distance(const A& a, const B& b) {
 	return 1. - static_cast<double>(overlap) / den;
 }
 
-inline void train(oracle_leaf& leaf, feature_map& features, const context_view& ctx, token_id target) {
+inline void prepare_leaf_features(oracle_leaf& leaf, const std::vector<context_view>& context_views,
+                                  std::span<const uint32_t> partition) {
+	std::vector<std::pair<feature_id, token_id>> entries;
+	std::size_t entry_count = 0;
+	for (const auto index : partition) {
+		entry_count += context_views[index].size();
+	}
+	entries.reserve(entry_count);
+
+	for (const auto index : partition) {
+		const auto& ctx = context_views[index];
+		const auto target = ctx.next_token();
+		for (std::size_t i = 0; i < ctx.size(); ++i) {
+			entries.emplace_back(ctx[i], target);
+		}
+	}
+
+	std::ranges::sort(entries);
+	const auto last = std::ranges::unique(entries).begin();
+	entries.erase(last, entries.end());
+
+	leaf.feature_offsets.reserve(entries.size() + 1);
+	leaf.feature_offsets.push_back(0);
+	for (const auto& [feature, target] : entries) {
+		if (leaf.feature_keys.empty() || leaf.feature_keys.back() != feature) {
+			if (!leaf.feature_keys.empty()) {
+				leaf.feature_offsets.push_back(static_cast<uint32_t>(leaf.entry_targets.size()));
+			}
+			leaf.feature_keys.push_back(feature);
+		}
+		leaf.entry_targets.push_back(target);
+		leaf.entry_counts.push_back(0);
+	}
+	leaf.feature_offsets.push_back(static_cast<uint32_t>(leaf.entry_targets.size()));
+}
+
+inline void train(oracle_leaf& leaf, const context_view& ctx, token_id target) {
 	assert(target < leaf.target_stats.size());
 
 	++leaf.sample_count;
@@ -168,30 +202,15 @@ inline void train(oracle_leaf& leaf, feature_map& features, const context_view& 
 	leaf.target_stats[target].feature_count += static_cast<uint32_t>(ctx.size());
 
 	for (std::size_t i = 0; i < ctx.size(); ++i) {
-		++features[ctx[i]][target];
-	}
-}
-
-inline void finalize_leaf(oracle_leaf& leaf, const feature_map& features) {
-	leaf.feature_keys.reserve(features.size());
-	for (const auto& [feature, _] : features) {
-		leaf.feature_keys.push_back(feature);
-	}
-	std::ranges::sort(leaf.feature_keys);
-
-	leaf.feature_offsets.reserve(leaf.feature_keys.size() + 1);
-	leaf.feature_offsets.push_back(0);
-
-	std::vector<std::pair<token_id, uint32_t>> ordered;
-	for (const auto feature : leaf.feature_keys) {
-		const auto& token_target_counts = features.at(feature);
-		ordered.assign(token_target_counts.begin(), token_target_counts.end());
-		std::ranges::sort(ordered, {}, &std::pair<token_id, uint32_t>::first);
-		for (const auto& [target, count] : ordered) {
-			leaf.entry_targets.push_back(target);
-			leaf.entry_counts.push_back(count);
-		}
-		leaf.feature_offsets.push_back(static_cast<uint32_t>(leaf.entry_targets.size()));
+		const auto key = ctx[i];
+		const auto kit = std::ranges::lower_bound(leaf.feature_keys, key);
+		assert(kit != leaf.feature_keys.end() && *kit == key);
+		const auto feature_index = static_cast<std::size_t>(kit - leaf.feature_keys.begin());
+		const auto entry_begin = leaf.entry_targets.begin() + leaf.feature_offsets[feature_index];
+		const auto entry_end = leaf.entry_targets.begin() + leaf.feature_offsets[feature_index + 1];
+		const auto tit = std::ranges::lower_bound(entry_begin, entry_end, target);
+		assert(tit != entry_end && *tit == target);
+		++leaf.entry_counts[static_cast<std::size_t>(tit - leaf.entry_targets.begin())];
 	}
 }
 
@@ -249,12 +268,11 @@ inline uint32_t build_leaf(oracle_tree& tree, const oracle_forest_config& cfg,
 	const auto leaf_index = static_cast<uint32_t>(tree.leaves.size());
 	auto& leaf = tree.leaves.emplace_back();
 	leaf.target_stats.resize(cfg.vocab_size);
-	feature_map features;
+	prepare_leaf_features(leaf, context_views, partition);
 	for (const auto index : partition) {
 		const auto& ctx = context_views[index];
-		train(leaf, features, ctx, ctx.next_token());
+		train(leaf, ctx, ctx.next_token());
 	}
-	finalize_leaf(leaf, features);
 
 	const auto node_index = tree.nodes.size();
 	tree.nodes.push_back({.leaf_index = leaf_index});
