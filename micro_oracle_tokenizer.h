@@ -37,7 +37,11 @@ struct token_seq_equal {
 	}
 };
 
-using subunit_counts = std::unordered_map<std::vector<token_id>, std::size_t, token_seq_hash, token_seq_equal>;
+// Map keyed by a token-id sequence, using the transparent hashers above.
+template <class Value>
+using token_seq_map = std::unordered_map<std::vector<token_id>, Value, token_seq_hash, token_seq_equal>;
+
+using subunit_counts = token_seq_map<std::size_t>;
 
 struct oracle_tokenizer_config {
 	int max_subunits{1000};
@@ -46,7 +50,7 @@ struct oracle_tokenizer_config {
 
 struct oracle_tokenizer {
 	std::vector<std::vector<token_id>> tokens; // token id -> subunit
-	std::unordered_map<std::vector<token_id>, token_id, token_seq_hash, token_seq_equal> ids; // subunit -> token id
+	token_seq_map<token_id> ids; // subunit -> token id
 	std::vector<std::size_t> lookup_lengths; // distinct multi-token subunit lengths, descending
 };
 
@@ -82,14 +86,9 @@ inline bool by_count_desc(const std::pair<std::vector<token_id>, std::size_t>& l
 	return lhs.first < rhs.first;
 }
 
-inline std::vector<std::vector<token_id>> select_top_subunits(const subunit_counts& counts, int max_subunits, std::size_t min_length = 1) {
-	std::vector<std::pair<std::vector<token_id>, std::size_t>> ranked;
-	ranked.reserve(counts.size());
-	for (const auto& [subunit, count] : counts) {
-		if (subunit.size() >= min_length) {
-			ranked.emplace_back(subunit, count);
-		}
-	}
+inline std::vector<std::vector<token_id>> select_top_subunits(const subunit_counts& counts, int max_subunits) {
+	// Every counted subunit already has length >= 2 (see count_subunit).
+	std::vector<std::pair<std::vector<token_id>, std::size_t>> ranked(counts.begin(), counts.end());
 	// Always fully sort: by_count_desc is a total order on distinct sequences,
 	// so this makes the result independent of unordered_map iteration order
 	// (which is nondeterministic on MSVC due to randomized hashing).
@@ -138,7 +137,7 @@ inline subunit_counts measure_subunits(const oracle_tokenizer_config& cfg, const
 		const auto next = std::ranges::upper_bound(offsets, static_cast<std::size_t>(g));
 		const auto s = static_cast<std::size_t>(next - offsets.begin()) - 1;
 		const auto i = static_cast<std::size_t>(g) - offsets[s];
-		boundaries[g] = is_boundary(model, samples[s], i, threshold) ? 1 : 0;
+		boundaries[g] = is_boundary(model, samples[s], i, threshold);
 	}
 
 	// Phase 2: slice samples at the detected boundaries and count subunits. This is
@@ -187,7 +186,7 @@ inline oracle_tokenizer build_oracle_tokenizer(const oracle_tokenizer_config& cf
 		add_token(tok, std::vector<token_id>{base});
 	}
 
-	for (auto& subunit : select_top_subunits(counts, cfg.max_subunits, 2)) {
+	for (auto& subunit : select_top_subunits(counts, cfg.max_subunits)) {
 		add_token(tok, std::move(subunit));
 	}
 
