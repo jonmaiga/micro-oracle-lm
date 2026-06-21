@@ -4,11 +4,9 @@
 #include <cassert>
 #include <cmath>
 #include <cstdint>
-#include <functional>
 #include <omp.h>
 #include <span>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -51,7 +49,7 @@ struct oracle_tokenizer_config {
 struct oracle_tokenizer {
 	std::vector<std::vector<token_id>> tokens; // token id -> subunit
 	token_seq_map<token_id> ids; // subunit -> token id
-	std::vector<std::size_t> lookup_lengths; // distinct multi-token subunit lengths, descending
+	std::size_t max_length{1}; // longest subunit length (base tokens have length 1)
 };
 
 inline token_id add_token(oracle_tokenizer& tok, std::vector<token_id> subunit) {
@@ -60,20 +58,10 @@ inline token_id add_token(oracle_tokenizer& tok, std::vector<token_id> subunit) 
 		return found->second;
 	}
 	const auto id = static_cast<token_id>(tok.tokens.size());
+	tok.max_length = std::max(tok.max_length, subunit.size());
 	tok.ids.emplace(subunit, id);
 	tok.tokens.push_back(std::move(subunit));
 	return id;
-}
-
-inline void build_lookup_lengths(oracle_tokenizer& tok) {
-	std::unordered_set<std::size_t> lengths;
-	for (const auto& subunit : tok.tokens) {
-		if (subunit.size() >= 2) {
-			lengths.insert(subunit.size());
-		}
-	}
-	tok.lookup_lengths.assign(lengths.begin(), lengths.end());
-	std::ranges::sort(tok.lookup_lengths, std::greater<>());
 }
 
 inline bool by_count_desc(const std::pair<std::vector<token_id>, std::size_t>& lhs, const std::pair<std::vector<token_id>, std::size_t>& rhs) {
@@ -190,26 +178,21 @@ inline oracle_tokenizer build_oracle_tokenizer(const oracle_tokenizer_config& cf
 		add_token(tok, std::move(subunit));
 	}
 
-	build_lookup_lengths(tok);
-
 	return tok;
 }
 
 inline const std::pair<const std::vector<token_id>, token_id>* find_match(const oracle_tokenizer& tok, std::span<const token_id> tokens, std::size_t pos) {
-	const auto remaining = tokens.size() - pos;
-	for (const auto length : tok.lookup_lengths) {
-		if (length > remaining) {
-			continue;
-		}
+	// Greedy longest match: try the longest possible subunit first, shrinking down.
+	// Every base token is always present, so the length-1 fallback never misses.
+	const auto max_length = std::min(tok.max_length, tokens.size() - pos);
+	for (std::size_t length = max_length; length >= 1; --length) {
 		const auto found = tok.ids.find(tokens.subspan(pos, length));
 		if (found != tok.ids.end()) {
 			return &*found;
 		}
 	}
-	// Every base token is always present, so the single-token fallback never misses.
-	const auto fallback = tok.ids.find(tokens.subspan(pos, 1));
-	assert(fallback != tok.ids.end());
-	return &*fallback;
+	assert(false && "length-1 fallback must always match");
+	return nullptr;
 }
 
 inline std::vector<token_id> encode(const oracle_tokenizer& tok, std::span<const token_id> tokens) {
