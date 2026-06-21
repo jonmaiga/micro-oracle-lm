@@ -6,8 +6,7 @@
 #include <cstdint>
 #include <functional>
 #include <omp.h>
-#include <string>
-#include <string_view>
+#include <span>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -16,27 +15,42 @@
 #include "micro_oracle_lm.h"
 
 namespace of {
-struct transparent_string_hash {
+// A subunit is a sequence of base token ids; these transparent hashers let the
+// lookup table be probed with a std::span without materializing a vector per query.
+struct token_seq_hash {
 	using is_transparent = void;
 
-	std::size_t operator()(std::string_view sv) const {
-		return std::hash<std::string_view>{}(sv);
+	std::size_t operator()(std::span<const token_id> seq) const {
+		std::size_t hash = 1469598103934665603ull; // FNV-1a offset basis
+		for (const auto token : seq) {
+			hash = (hash ^ token) * 1099511628211ull; // FNV-1a prime
+		}
+		return hash;
 	}
 };
+
+struct token_seq_equal {
+	using is_transparent = void;
+
+	bool operator()(std::span<const token_id> lhs, std::span<const token_id> rhs) const {
+		return std::ranges::equal(lhs, rhs);
+	}
+};
+
+using subunit_counts = std::unordered_map<std::vector<token_id>, std::size_t, token_seq_hash, token_seq_equal>;
 
 struct oracle_tokenizer_config {
 	int max_subunits{1000};
 	double surprise_bits{2.0};
-	oracle_forest_config forest{};
 };
 
 struct oracle_tokenizer {
-	std::vector<std::string> tokens; // token id -> subunit
-	std::unordered_map<std::string, token_id, transparent_string_hash, std::equal_to<>> ids; // subunit -> token id
-	std::vector<std::size_t> lookup_lengths; // distinct multi-byte subunit lengths, descending
+	std::vector<std::vector<token_id>> tokens; // token id -> subunit
+	std::unordered_map<std::vector<token_id>, token_id, token_seq_hash, token_seq_equal> ids; // subunit -> token id
+	std::vector<std::size_t> lookup_lengths; // distinct multi-token subunit lengths, descending
 };
 
-inline token_id add_token(oracle_tokenizer& tok, std::string subunit) {
+inline token_id add_token(oracle_tokenizer& tok, std::vector<token_id> subunit) {
 	const auto found = tok.ids.find(subunit);
 	if (found != tok.ids.end()) {
 		return found->second;
@@ -58,7 +72,7 @@ inline void build_lookup_lengths(oracle_tokenizer& tok) {
 	std::ranges::sort(tok.lookup_lengths, std::greater<>());
 }
 
-inline bool by_count_desc(const std::pair<std::string, std::size_t>& lhs, const std::pair<std::string, std::size_t>& rhs) {
+inline bool by_count_desc(const std::pair<std::vector<token_id>, std::size_t>& lhs, const std::pair<std::vector<token_id>, std::size_t>& rhs) {
 	if (lhs.second != rhs.second) {
 		return lhs.second > rhs.second;
 	}
@@ -68,22 +82,22 @@ inline bool by_count_desc(const std::pair<std::string, std::size_t>& lhs, const 
 	return lhs.first < rhs.first;
 }
 
-inline std::vector<std::string> select_top_subunits(const std::unordered_map<std::string, std::size_t>& counts, int max_subunits, std::size_t min_length = 1) {
-	std::vector<std::pair<std::string, std::size_t>> ranked;
+inline std::vector<std::vector<token_id>> select_top_subunits(const subunit_counts& counts, int max_subunits, std::size_t min_length = 1) {
+	std::vector<std::pair<std::vector<token_id>, std::size_t>> ranked;
 	ranked.reserve(counts.size());
 	for (const auto& [subunit, count] : counts) {
 		if (subunit.size() >= min_length) {
 			ranked.emplace_back(subunit, count);
 		}
 	}
-	// Always fully sort: by_count_desc is a total order on distinct strings,
+	// Always fully sort: by_count_desc is a total order on distinct sequences,
 	// so this makes the result independent of unordered_map iteration order
-	// (which is nondeterministic on MSVC due to randomized string hashing).
+	// (which is nondeterministic on MSVC due to randomized hashing).
 	std::ranges::sort(ranked, by_count_desc);
 	if (max_subunits >= 0 && ranked.size() > static_cast<std::size_t>(max_subunits)) {
 		ranked.resize(static_cast<std::size_t>(max_subunits));
 	}
-	std::vector<std::string> subunits;
+	std::vector<std::vector<token_id>> subunits;
 	subunits.reserve(ranked.size());
 	for (auto& [subunit, _] : ranked) {
 		subunits.push_back(std::move(subunit));
@@ -91,9 +105,9 @@ inline std::vector<std::string> select_top_subunits(const std::unordered_map<std
 	return subunits;
 }
 
-inline void count_subunit(std::unordered_map<std::string, std::size_t>& counts, const std::string& text, std::size_t first, std::size_t last) {
+inline void count_subunit(subunit_counts& counts, const std::vector<token_id>& sample, std::size_t first, std::size_t last) {
 	if (last - first >= 2) {
-		++counts[std::string(text.data() + first, last - first)];
+		++counts[std::vector<token_id>(sample.begin() + first, sample.begin() + last)];
 	}
 }
 
@@ -102,11 +116,10 @@ inline bool is_boundary(const oracle_forest& model, const std::vector<token_id>&
 	return probabilities[sample[index + 1]] < threshold;
 }
 
-inline std::unordered_map<std::string, std::size_t> measure_subunits(const oracle_tokenizer_config& cfg, const oracle_forest& model,
-                                                                     const std::vector<std::string>& texts,
-                                                                     const std::vector<std::vector<token_id>>& samples) {
+inline subunit_counts measure_subunits(const oracle_tokenizer_config& cfg, const oracle_forest& model,
+									   const std::vector<std::vector<token_id>>& samples) {
 	const int thread_count = std::max(1, omp_get_max_threads());
-	std::vector<std::unordered_map<std::string, std::size_t>> local_counts(thread_count);
+	std::vector<subunit_counts> local_counts(thread_count);
 	for (auto& local : local_counts) {
 		local.reserve(samples.size() / thread_count + 1);
 	}
@@ -116,18 +129,17 @@ inline std::unordered_map<std::string, std::size_t> measure_subunits(const oracl
 	for (int64_t s = 0; s < static_cast<int64_t>(samples.size()); ++s) {
 		auto& local = local_counts[omp_get_thread_num()];
 		const auto& sample = samples[s];
-		const auto& text = texts[s];
 		std::size_t subunit_begin = 0;
 		for (std::size_t i = 0; i + 1 < sample.size(); ++i) {
 			if (is_boundary(model, sample, i, threshold)) {
-				count_subunit(local, text, subunit_begin, i + 1);
+				count_subunit(local, sample, subunit_begin, i + 1);
 				subunit_begin = i + 1;
 			}
 		}
-		count_subunit(local, text, subunit_begin, sample.size());
+		count_subunit(local, sample, subunit_begin, sample.size());
 	}
 
-	std::unordered_map<std::string, std::size_t> counts;
+	subunit_counts counts;
 	std::size_t total_unique = 0;
 	for (const auto& local : local_counts) {
 		total_unique += local.size();
@@ -141,65 +153,52 @@ inline std::unordered_map<std::string, std::size_t> measure_subunits(const oracl
 	return counts;
 }
 
-inline oracle_tokenizer build_oracle_tokenizer(oracle_tokenizer_config cfg, const std::vector<std::string>& samples) {
+inline oracle_tokenizer build_oracle_tokenizer(const oracle_tokenizer_config& cfg, const oracle_forest& model,
+											   const std::vector<std::vector<token_id>>& samples) {
 	oracle_tokenizer tok;
 	if (samples.empty()) {
 		return tok;
 	}
 
-	// Char-level tokenization feeding the boundary model.
-	vocabulary vocab;
-	std::vector<std::vector<token_id>> char_samples;
-	char_samples.reserve(samples.size());
-	for (const auto& sample : samples) {
-		auto& tokens = char_samples.emplace_back();
-		tokens.reserve(sample.size());
-		for (const unsigned char byte : sample) {
-			tokens.push_back(vocab.encode(byte));
-		}
-	}
+	const auto counts = measure_subunits(cfg, model, samples);
 
-	cfg.forest.vocab_size = vocab.size();
-	const auto model = build_oracle_forest(cfg.forest, char_samples);
-	const auto counts = measure_subunits(cfg, model, samples, char_samples);
-
-	// Pre-add all 256 single-byte fallback tokens.
-	for (int b = 0; b < 256; ++b) {
-		add_token(tok, std::string(1, static_cast<char>(b)));
+	// Pre-add every base token as a single-token fallback so encoding never misses.
+	for (token_id base = 0; base < model.cfg.vocab_size; ++base) {
+		add_token(tok, std::vector<token_id>{base});
 	}
-	// Select only multi-byte subunits (single-byte are already covered).
-	for (const auto& subunit : select_top_subunits(counts, cfg.max_subunits, 2)) {
-		add_token(tok, subunit);
+	// Select only multi-token subunits (single tokens are already covered).
+	for (auto& subunit : select_top_subunits(counts, cfg.max_subunits, 2)) {
+		add_token(tok, std::move(subunit));
 	}
 	build_lookup_lengths(tok);
 	return tok;
 }
 
-inline const std::pair<const std::string, token_id>* find_match(const oracle_tokenizer& tok, std::string_view text, std::size_t pos) {
-	const auto remaining = text.size() - pos;
+inline const std::pair<const std::vector<token_id>, token_id>* find_match(const oracle_tokenizer& tok, std::span<const token_id> tokens, std::size_t pos) {
+	const auto remaining = tokens.size() - pos;
 	for (const auto length : tok.lookup_lengths) {
 		if (length > remaining) {
 			continue;
 		}
-		const auto found = tok.ids.find(text.substr(pos, length));
+		const auto found = tok.ids.find(tokens.subspan(pos, length));
 		if (found != tok.ids.end()) {
 			return &*found;
 		}
 	}
-	// All 256 single bytes are always present, so the fallback never misses.
-	const auto fallback = tok.ids.find(text.substr(pos, 1));
+	// Every base token is always present, so the single-token fallback never misses.
+	const auto fallback = tok.ids.find(tokens.subspan(pos, 1));
 	assert(fallback != tok.ids.end());
 	return &*fallback;
 }
 
-inline std::vector<token_id> encode(const oracle_tokenizer& tok, std::string_view text) {
-	std::vector<token_id> tokens;
+inline std::vector<token_id> encode(const oracle_tokenizer& tok, std::span<const token_id> tokens) {
+	std::vector<token_id> result;
 	std::size_t pos = 0;
-	while (pos < text.size()) {
-		const auto* match = find_match(tok, text, pos);
-		tokens.push_back(match->second);
+	while (pos < tokens.size()) {
+		const auto* match = find_match(tok, tokens, pos);
+		result.push_back(match->second);
 		pos += match->first.size();
 	}
-	return tokens;
+	return result;
 }
 }

@@ -36,16 +36,6 @@ std::vector<token_id> random_tokens(mx3random& r, uint32_t length, uint32_t voca
 	return tokens;
 }
 
-std::string random_text(mx3random& r, uint32_t length, uint32_t alphabet_size) {
-	std::uniform_int_distribution<uint32_t> char_dist(0, alphabet_size - 1);
-	std::string text;
-	text.reserve(length);
-	for (uint32_t i = 0; i < length; ++i) {
-		text.push_back(static_cast<char>('a' + char_dist(r)));
-	}
-	return text;
-}
-
 uint64_t no_change_hash(of::oracle_forest_config config) {
 	constexpr uint32_t vocab_size = 20;
 	mx3random r(1234);
@@ -73,25 +63,27 @@ uint64_t no_change_hash(of::oracle_forest_config config) {
 	return hash;
 }
 
-uint64_t tokenizer_no_change_hash(of::oracle_tokenizer_config config) {
+uint64_t tokenizer_no_change_hash(of::oracle_tokenizer_config config, of::oracle_forest_config forest_config) {
 	constexpr uint32_t alphabet_size = 8;
 	mx3random r(1234);
 	std::uniform_int_distribution<uint32_t> sample_size_dist(0, 50);
 
-	std::vector<std::string> samples;
+	std::vector<std::vector<token_id>> samples;
 	samples.reserve(200);
 	for (int i = 0; i < 200; ++i) {
-		samples.push_back(random_text(r, sample_size_dist(r), alphabet_size));
+		samples.push_back(random_tokens(r, sample_size_dist(r), alphabet_size));
 	}
 
-	const auto tokenizer = of::build_oracle_tokenizer(config, samples);
+	forest_config.vocab_size = alphabet_size;
+	const auto model = of::build_oracle_forest(forest_config, samples);
+	const auto tokenizer = of::build_oracle_tokenizer(config, model, samples);
 
 	uint64_t hash = 1;
 	hash ^= std::hash<std::size_t>{}(tokenizer.tokens.size());
 	std::uniform_int_distribution<uint32_t> test_sample_size_dist(0, 60);
 	for (int i = 0; i < 1000; ++i) {
-		const auto text = random_text(r, test_sample_size_dist(r), alphabet_size);
-		for (const auto token : of::encode(tokenizer, text)) {
+		const auto tokens = random_tokens(r, test_sample_size_dist(r), alphabet_size);
+		for (const auto token : of::encode(tokenizer, tokens)) {
 			hash ^= std::hash<of::token_id>{}(token);
 		}
 	}
@@ -106,9 +98,9 @@ void check_integrity() {
 		std::cout << "WARN: the new hash " << hash << " differs from expected hash " << expected_hash << ". Intentional behavior change?\n";
 	}
 
-	constexpr uint64_t expected_tokenizer_hash = 16296053255964421837ull;
+	constexpr uint64_t expected_tokenizer_hash = 2247430693654926574ull;
 
-	const auto tokenizer_hash = tokenizer_no_change_hash({.max_subunits = 64, .surprise_bits = 3.0, .forest = {.context_size = 5, .max_depth = 8, .ensemble_size = 4}});
+	const auto tokenizer_hash = tokenizer_no_change_hash({.max_subunits = 64, .surprise_bits = 3.0}, {.context_size = 5, .max_depth = 8, .ensemble_size = 4});
 	if (tokenizer_hash != expected_tokenizer_hash) {
 		std::cout << "WARN: the new tokenizer hash " << tokenizer_hash << " differs from expected hash " << expected_tokenizer_hash << ". Intentional behavior change?\n";
 	}
@@ -151,7 +143,7 @@ int main(int argc, char** argv) {
 	cfg.ensemble_size = 8;
 	cfg.context_size = 6;
 
-	of::test_tokenizer({.max_subunits = 1000, .surprise_bits = 4.0, .forest = cfg}, sample);
+	of::test_tokenizer({.max_subunits = 1000, .surprise_bits = 4.0}, cfg, sample);
 
 	evaluate_held_out_bpb(cfg, sample);
 
