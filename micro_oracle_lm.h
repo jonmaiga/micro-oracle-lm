@@ -294,8 +294,10 @@ inline uint32_t build_tree_recursively(oracle_tree& tree, const oracle_forest_co
 }
 
 
-inline oracle_tree build_tree(const oracle_forest_config& cfg, const std::vector<context_view>& contexts, std::vector<uint32_t> partition, mx3random& rng) {
+inline oracle_tree build_tree(const oracle_forest_config& cfg, const std::vector<context_view>& contexts, mx3random& rng) {
 	oracle_tree tree;
+	std::vector<uint32_t> partition(contexts.size());
+	std::iota(partition.begin(), partition.end(), 0u);
 	build_tree_recursively(tree, cfg, contexts, partition, 0, rng);
 	return tree;
 }
@@ -323,16 +325,10 @@ inline oracle_forest build_oracle_forest(const oracle_forest_config& cfg, const 
 	oracle_forest forest{.cfg = cfg};
 	forest.trees.resize(cfg.vocab_size);
 	const int token_count = static_cast<int>(forest.trees.size());
-	std::vector<std::vector<uint32_t>> partitions(token_count);
 	for (int token = 0; token < token_count; ++token) {
-		const auto& contexts = token_contexts[token];
-		if (contexts.empty()) {
-			continue;
+		if (!token_contexts[token].empty()) {
+			forest.trees[token].resize(cfg.ensemble_size);
 		}
-		auto& partition = partitions[token];
-		partition.resize(contexts.size());
-		std::iota(partition.begin(), partition.end(), 0u);
-		forest.trees[token].resize(cfg.ensemble_size);
 	}
 
 	const auto task_count = static_cast<int64_t>(token_count) * static_cast<int64_t>(cfg.ensemble_size);
@@ -346,7 +342,7 @@ inline oracle_forest build_oracle_forest(const oracle_forest_config& cfg, const 
 
 		const auto tree_index = static_cast<uint32_t>(task % cfg.ensemble_size);
 		mx3random rng(task);
-		forest.trees[token][tree_index] = build_tree(cfg, contexts, partitions[token], rng);
+		forest.trees[token][tree_index] = build_tree(cfg, contexts, rng);
 	}
 
 	return forest;
