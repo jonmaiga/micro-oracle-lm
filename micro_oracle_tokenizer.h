@@ -117,12 +117,14 @@ inline bool is_boundary(const oracle_forest& model, const std::vector<token_id>&
 }
 
 inline subunit_counts measure_subunits(const oracle_tokenizer_config& cfg, const oracle_forest& model,
-									   const std::vector<std::vector<token_id>>& samples) {
+                                       const std::vector<std::vector<token_id>>& samples) {
 	const int thread_count = std::max(1, omp_get_max_threads());
+
 	std::vector<subunit_counts> local_counts(thread_count);
 	for (auto& local : local_counts) {
 		local.reserve(samples.size() / thread_count + 1);
 	}
+
 	const auto threshold = std::pow(2.0, -cfg.surprise_bits);
 
 #pragma omp parallel for schedule(dynamic, 1) num_threads(thread_count)
@@ -154,23 +156,20 @@ inline subunit_counts measure_subunits(const oracle_tokenizer_config& cfg, const
 }
 
 inline oracle_tokenizer build_oracle_tokenizer(const oracle_tokenizer_config& cfg, const oracle_forest& model,
-											   const std::vector<std::vector<token_id>>& samples) {
-	oracle_tokenizer tok;
-	if (samples.empty()) {
-		return tok;
-	}
-
+                                               const std::vector<std::vector<token_id>>& samples) {
 	const auto counts = measure_subunits(cfg, model, samples);
 
-	// Pre-add every base token as a single-token fallback so encoding never misses.
+	oracle_tokenizer tok;
 	for (token_id base = 0; base < model.cfg.vocab_size; ++base) {
 		add_token(tok, std::vector<token_id>{base});
 	}
-	// Select only multi-token subunits (single tokens are already covered).
+
 	for (auto& subunit : select_top_subunits(counts, cfg.max_subunits, 2)) {
 		add_token(tok, std::move(subunit));
 	}
+
 	build_lookup_lengths(tok);
+
 	return tok;
 }
 
