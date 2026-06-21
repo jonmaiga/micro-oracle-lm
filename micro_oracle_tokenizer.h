@@ -159,17 +159,17 @@ inline std::vector<token_id> encode(const oracle_tokenizer& tok, subunit_view to
 
 	for (std::size_t pos = 0; pos < tokens.size();) {
 		const auto max_length = std::min(tok.max_length, tokens.size() - pos);
-		bool matched = false;
-		for (std::size_t length = max_length; length >= 1; --length) {
+		std::size_t length = max_length;
+		while (length >= 1) {
 			const auto found = tok.ids.find(tokens.subspan(pos, length));
 			if (found != tok.ids.end()) {
 				result.push_back(found->second);
 				pos += length;
-				matched = true;
 				break;
 			}
+			--length;
 		}
-		assert(matched && "length-1 fallback must always match");
+		assert(length != 0 && "length-1 fallback must always match");
 	}
 	return result;
 }
