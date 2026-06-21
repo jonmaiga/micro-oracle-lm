@@ -118,22 +118,45 @@ inline bool is_boundary(const oracle_forest& model, const std::vector<token_id>&
 
 inline subunit_counts measure_subunits(const oracle_tokenizer_config& cfg, const oracle_forest& model,
                                        const std::vector<std::vector<token_id>>& samples) {
-	const int thread_count = std::max(1, omp_get_max_threads());
+	const auto threshold = std::pow(2.0, -cfg.surprise_bits);
 
+	// Map every predictable position (i, i+1 < sample.size()) of every sample onto
+	// a single global index space. offsets[s] is the first global index of sample s.
+	std::vector<std::size_t> offsets(samples.size() + 1);
+	for (std::size_t s = 0; s < samples.size(); ++s) {
+		const auto positions = samples[s].empty() ? 0 : samples[s].size() - 1;
+		offsets[s + 1] = offsets[s] + positions;
+	}
+	const auto position_count = static_cast<int64_t>(offsets.back());
+
+	// Phase 1: detect boundaries. Each position is independent and dominated by the
+	// cost of predict(), so we parallelize over the flattened position space rather
+	// than over samples. This keeps every thread busy even for a single huge sample.
+	std::vector<uint8_t> boundaries(offsets.back());
+#pragma omp parallel for schedule(dynamic, 256)
+	for (int64_t g = 0; g < position_count; ++g) {
+		const auto next = std::ranges::upper_bound(offsets, static_cast<std::size_t>(g));
+		const auto s = static_cast<std::size_t>(next - offsets.begin()) - 1;
+		const auto i = static_cast<std::size_t>(g) - offsets[s];
+		boundaries[g] = is_boundary(model, samples[s], i, threshold) ? 1 : 0;
+	}
+
+	// Phase 2: slice samples at the detected boundaries and count subunits. This is
+	// cheap relative to phase 1, so parallelizing over samples is sufficient.
+	const int thread_count = std::max(1, omp_get_max_threads());
 	std::vector<subunit_counts> local_counts(thread_count);
 	for (auto& local : local_counts) {
 		local.reserve(samples.size() / thread_count + 1);
 	}
 
-	const auto threshold = std::pow(2.0, -cfg.surprise_bits);
-
 #pragma omp parallel for schedule(dynamic, 1) num_threads(thread_count)
 	for (int64_t s = 0; s < static_cast<int64_t>(samples.size()); ++s) {
 		auto& local = local_counts[omp_get_thread_num()];
 		const auto& sample = samples[s];
+		const auto base = offsets[s];
 		std::size_t subunit_begin = 0;
 		for (std::size_t i = 0; i + 1 < sample.size(); ++i) {
-			if (is_boundary(model, sample, i, threshold)) {
+			if (boundaries[base + i]) {
 				count_subunit(local, sample, subunit_begin, i + 1);
 				subunit_begin = i + 1;
 			}
