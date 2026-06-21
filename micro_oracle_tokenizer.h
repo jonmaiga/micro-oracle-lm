@@ -7,7 +7,6 @@
 #include <omp.h>
 #include <span>
 #include <unordered_map>
-#include <utility>
 #include <vector>
 
 #include "micro_oracle_lm.h"
@@ -35,11 +34,9 @@ struct token_seq_equal {
 	}
 };
 
-// Map keyed by a token-id sequence, using the transparent hashers above.
-template <class Value>
-using token_seq_map = std::unordered_map<std::vector<token_id>, Value, token_seq_hash, token_seq_equal>;
-
-using subunit_counts = token_seq_map<std::size_t>;
+using subunit = std::vector<token_id>;
+using subunit_counts = std::unordered_map<subunit, std::size_t, token_seq_hash, token_seq_equal>;
+using subunit_ids = std::unordered_map<subunit, token_id, token_seq_hash, token_seq_equal>;
 
 struct oracle_tokenizer_config {
 	std::size_t max_subunits{1000};
@@ -47,12 +44,12 @@ struct oracle_tokenizer_config {
 };
 
 struct oracle_tokenizer {
-	std::vector<std::vector<token_id>> tokens; // token id -> subunit
-	token_seq_map<token_id> ids; // subunit -> token id
+	std::vector<subunit> tokens; // token id -> subunit
+	subunit_ids ids; // subunit -> token id
 	std::size_t max_length{1}; // longest subunit length (base tokens have length 1)
 };
 
-inline void add_token(oracle_tokenizer& tok, std::vector<token_id> subunit) {
+inline void add_token(oracle_tokenizer& tok, subunit subunit) {
 	assert(!tok.ids.contains(subunit));
 
 	const auto id = static_cast<token_id>(tok.tokens.size());
@@ -99,7 +96,7 @@ inline subunit_counts measure_subunits(const oracle_tokenizer_config& cfg, const
 		const auto base = offsets[s];
 		const auto count_subunit = [&](std::size_t first, std::size_t last) {
 			if (last - first >= 2) {
-				++local[std::vector<token_id>(sample.begin() + first, sample.begin() + last)];
+				++local[subunit(sample.begin() + first, sample.begin() + last)];
 			}
 		};
 
@@ -125,7 +122,7 @@ inline subunit_counts measure_subunits(const oracle_tokenizer_config& cfg, const
 inline oracle_tokenizer build_oracle_tokenizer(const oracle_tokenizer_config& cfg, const oracle_forest& model,
                                                const std::vector<std::vector<token_id>>& samples) {
 	const auto counts = measure_subunits(cfg, model, samples);
-	std::vector<std::pair<std::vector<token_id>, std::size_t>> ranked(counts.begin(), counts.end());
+	std::vector<std::pair<subunit, std::size_t>> ranked(counts.begin(), counts.end());
 	// Fully sort so the result is independent of unordered_map iteration order.
 	std::ranges::sort(ranked, [](const auto& lhs, const auto& rhs) {
 		if (lhs.second != rhs.second) {
@@ -144,7 +141,7 @@ inline oracle_tokenizer build_oracle_tokenizer(const oracle_tokenizer_config& cf
 	tok.tokens.reserve(model.cfg.vocab_size + ranked.size());
 	tok.ids.reserve(model.cfg.vocab_size + ranked.size());
 	for (token_id base = 0; base < model.cfg.vocab_size; ++base) {
-		add_token(tok, std::vector<token_id>{base});
+		add_token(tok, subunit{base});
 	}
 
 	for (auto& [subunit, _] : ranked) {
