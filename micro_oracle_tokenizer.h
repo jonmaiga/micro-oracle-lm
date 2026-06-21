@@ -12,12 +12,15 @@
 #include "micro_oracle_lm.h"
 
 namespace of {
-// A subunit is a sequence of base token ids; these transparent hashers let the
-// lookup table be probed with a std::span without materializing a vector per query.
-struct token_seq_hash {
+using subunit = std::vector<token_id>;
+using subunit_view = std::span<const token_id>;
+
+// Transparent hash/equality lets subunit maps be probed with subunit_view without
+// materializing a vector per query.
+struct subunit_hash {
 	using is_transparent = void;
 
-	std::size_t operator()(std::span<const token_id> seq) const {
+	std::size_t operator()(subunit_view seq) const {
 		std::size_t hash = 1469598103934665603ull; // FNV-1a offset basis
 		for (const auto token : seq) {
 			hash = (hash ^ token) * 1099511628211ull; // FNV-1a prime
@@ -26,17 +29,16 @@ struct token_seq_hash {
 	}
 };
 
-struct token_seq_equal {
+struct subunit_equal {
 	using is_transparent = void;
 
-	bool operator()(std::span<const token_id> lhs, std::span<const token_id> rhs) const {
+	bool operator()(subunit_view lhs, subunit_view rhs) const {
 		return std::ranges::equal(lhs, rhs);
 	}
 };
 
-using subunit = std::vector<token_id>;
-using subunit_counts = std::unordered_map<subunit, std::size_t, token_seq_hash, token_seq_equal>;
-using subunit_ids = std::unordered_map<subunit, token_id, token_seq_hash, token_seq_equal>;
+using subunit_counts = std::unordered_map<subunit, std::size_t, subunit_hash, subunit_equal>;
+using subunit_ids = std::unordered_map<subunit, token_id, subunit_hash, subunit_equal>;
 
 struct oracle_tokenizer_config {
 	std::size_t max_subunits{1000};
@@ -49,13 +51,13 @@ struct oracle_tokenizer {
 	std::size_t max_length{1}; // longest subunit length (base tokens have length 1)
 };
 
-inline void add_token(oracle_tokenizer& tok, subunit subunit) {
-	assert(!tok.ids.contains(subunit));
+inline void add_token(oracle_tokenizer& tok, subunit unit) {
+	assert(!tok.ids.contains(unit));
 
 	const auto id = static_cast<token_id>(tok.tokens.size());
-	tok.max_length = std::max(tok.max_length, subunit.size());
-	tok.ids.emplace(subunit, id);
-	tok.tokens.push_back(std::move(subunit));
+	tok.max_length = std::max(tok.max_length, unit.size());
+	tok.ids.emplace(unit, id);
+	tok.tokens.push_back(std::move(unit));
 }
 
 inline subunit_counts measure_subunits(const oracle_tokenizer_config& cfg, const oracle_forest& model,
@@ -151,7 +153,7 @@ inline oracle_tokenizer build_oracle_tokenizer(const oracle_tokenizer_config& cf
 	return tok;
 }
 
-inline std::vector<token_id> encode(const oracle_tokenizer& tok, std::span<const token_id> tokens) {
+inline std::vector<token_id> encode(const oracle_tokenizer& tok, subunit_view tokens) {
 	std::vector<token_id> result;
 	result.reserve(tokens.size());
 
