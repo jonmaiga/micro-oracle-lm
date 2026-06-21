@@ -26,7 +26,7 @@ struct transparent_string_hash {
 
 struct oracle_tokenizer_config {
 	int max_subunits{4096};
-	double surprise_bits{4.0};
+	double surprise_bits{2.0};
 	oracle_forest_config forest{};
 };
 
@@ -103,8 +103,8 @@ inline bool is_boundary(const oracle_forest& model, const std::vector<token_id>&
 }
 
 inline std::unordered_map<std::string, std::size_t> measure_subunits(const oracle_tokenizer_config& cfg, const oracle_forest& model,
-																	 const std::vector<std::string>& texts,
-																	 const std::vector<std::vector<token_id>>& samples) {
+                                                                     const std::vector<std::string>& texts,
+                                                                     const std::vector<std::vector<token_id>>& samples) {
 	const int thread_count = std::max(1, omp_get_max_threads());
 	std::vector<std::unordered_map<std::string, std::size_t>> local_counts(thread_count);
 	for (auto& local : local_counts) {
