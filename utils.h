@@ -52,104 +52,6 @@ namespace of {namespace detail {
 	}
 	} // namespace detail
 
-	struct model_size_bytes {
-		std::size_t forest{};
-		std::size_t token_tree_vectors{};
-		std::size_t trees{};
-		std::size_t nodes{};
-		std::size_t center_contexts{};
-		std::size_t leaves{};
-		std::size_t target_stats{};
-		std::size_t feature_keys{};
-		std::size_t feature_offsets{};
-		std::size_t entries{};
-		std::size_t serialized{};
-
-		std::size_t total() const {
-			return forest + token_tree_vectors + trees + nodes + center_contexts + leaves
-				+ target_stats + feature_keys + feature_offsets + entries;
-		}
-	};
-
-	inline model_size_bytes size_bytes(const oracle_forest& forest) {
-		model_size_bytes size;
-		size.forest += sizeof(forest);
-		size.token_tree_vectors += forest.trees.size() * sizeof(std::vector<oracle_tree>);
-		size.serialized += sizeof(oracle_forest_config) + sizeof(uint32_t); // cfg + token tree vector count
-
-		for (const auto& token_trees : forest.trees) {
-			size.trees += token_trees.size() * sizeof(oracle_tree);
-			size.serialized += sizeof(uint32_t); // trees for this token
-			for (const auto& tree : token_trees) {
-				size.nodes += tree.nodes.size() * sizeof(oracle_node);
-				size.leaves += tree.leaves.size() * sizeof(oracle_leaf);
-				size.serialized += 2 * sizeof(uint32_t); // node count + leaf count
-
-				for (const auto& node : tree.nodes) {
-					size.center_contexts += node.center_context.size() * sizeof(feature_id);
-					size.serialized += sizeof(uint32_t); // center context size
-					size.serialized += node.center_context.size() * sizeof(feature_id);
-					size.serialized += sizeof(double) + 3 * sizeof(uint32_t); // radius + inner + outer + leaf_index
-				}
-
-				for (const auto& leaf : tree.leaves) {
-					size.target_stats += leaf.target_stats.size() * sizeof(target_stat);
-					size.feature_keys += leaf.feature_keys.size() * sizeof(feature_id);
-					size.feature_offsets += leaf.feature_offsets.size() * sizeof(uint32_t);
-					size.entries += leaf.entry_targets.size() * sizeof(token_id);
-					size.entries += leaf.entry_counts.size() * sizeof(uint32_t);
-					size.serialized += sizeof(uint32_t); // sample_count
-					size.serialized += sizeof(uint32_t); // target stat count
-					size.serialized += leaf.target_stats.size() * sizeof(target_stat);
-					size.serialized += sizeof(uint32_t); // feature key count
-					size.serialized += leaf.feature_keys.size() * sizeof(feature_id);
-					size.serialized += leaf.entry_targets.size() * (sizeof(token_id) + sizeof(uint32_t));
-				}
-			}
-		}
-
-		return size;
-	}
-
-	inline void print_size_bytes(std::ostream& out, const model_size_bytes& size) {
-		struct byte_count {
-			double value;
-			const char* unit;
-		};
-
-		const auto format = [](std::size_t bytes) -> byte_count {
-			if (bytes >= 1024ull * 1024ull) {
-				return {static_cast<double>(bytes) / (1024.0 * 1024.0), "MB"};
-			}
-			if (bytes >= 1024ull) {
-				return {static_cast<double>(bytes) / 1024.0, "KB"};
-			}
-			return {static_cast<double>(bytes), "B"};
-		};
-
-		const auto [total_value, total_unit] = format(size.total());
-		out << "Model size: " << total_value << ' ' << total_unit << "\n";
-		const auto print = [&](const char* name, std::size_t bytes) {
-			const auto [value, unit] = format(bytes);
-			out << "  " << name << ": " << value << ' ' << unit << '\n';
-		};
-		print("forest", size.forest);
-		print("token_tree_vectors", size.token_tree_vectors);
-		print("trees", size.trees);
-		print("nodes", size.nodes);
-		print("center_contexts", size.center_contexts);
-		print("leaves", size.leaves);
-		print("target_stats", size.target_stats);
-		print("feature_keys", size.feature_keys);
-		print("feature_offsets", size.feature_offsets);
-		print("entries", size.entries);
-		print("serialized", size.serialized);
-	}
-
-	inline void print_size_bytes(std::ostream& out, const oracle_forest& forest) {
-		print_size_bytes(out, size_bytes(forest));
-	}
-
 	// Computes bits-per-byte over the held-out tokens.
 	inline double compute_bpb(const oracle_forest& forest, const std::vector<token_id>& tokens) {
 		constexpr double epsilon = 1e-12;
@@ -261,10 +163,6 @@ namespace of {namespace detail {
 		const auto eval_seconds = detail::seconds_between(eval_start, std::chrono::steady_clock::now());
 
 		std::cout << "Held-out BPB: " << bpb << " bits/byte (train " << train_seconds << " s, eval " << eval_seconds << " s).\n";
-
-		const auto size_stats = size_bytes(forest);
-		print_size_bytes(std::cout, size_stats);
-		std::cout << "Model size ratio: " << static_cast<double>(size_stats.serialized) / sample.size() << "\n\n";
 
 		std::cout << "Generating...\n";
 		mx3random rng(42);

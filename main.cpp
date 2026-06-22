@@ -112,7 +112,7 @@ int main(int argc, char** argv) {
 
 	check_integrity();
 
-	constexpr std::size_t max_size = 5000000;
+	constexpr std::size_t max_size = 500000000;
 
 	const std::string base_path = "C:/tmp/datasets/";
 
@@ -139,11 +139,11 @@ int main(int argc, char** argv) {
 	std::cout << "Loaded '" << path << " bytes: " << sample.size() << ".\n";
 
 	of::oracle_forest_config cfg;
-	cfg.max_depth = 8;
-	cfg.ensemble_size = 8;
+	cfg.max_depth = 3;
+	cfg.ensemble_size = 3;
 	cfg.context_size = 6;
 
-	of::test_tokenizer({.max_subunits = 1000, .surprise_bits = 4.0}, cfg, sample);
+	// of::test_tokenizer({.max_subunits = 1000, .surprise_bits = 1.0}, cfg, sample);
 
 	evaluate_held_out_bpb(cfg, sample);
 
